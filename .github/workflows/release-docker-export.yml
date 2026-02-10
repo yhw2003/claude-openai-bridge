@@ -14,7 +14,7 @@ on:
 
 jobs:
   build-and-upload-image:
-    if: ${{ github.event_name == 'workflow_dispatch' || (!github.event.release.draft && (github.event.action != 'edited' || github.actor != 'github-actions[bot]')) }}
+    if: ${{ github.event_name == 'workflow_dispatch' || (!github.event.release.draft && github.actor != 'github-actions[bot]') }}
     runs-on: ubuntu-latest
     permissions:
       contents: write

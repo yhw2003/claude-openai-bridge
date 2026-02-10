@@ -43,3 +43,56 @@ jobs:
 
       - name: Build docker image
         run: docker build --pull --no-cache --tag bridge-ci:${{ github.sha }} .
+
+  publish-release-asset:
+    runs-on: ubuntu-latest
+    needs:
+      - rust-ci
+      - docker-build
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Compute release metadata
+        id: metadata
+        shell: bash
+        run: |
+          short_sha="$(git rev-parse --short HEAD)"
+          full_sha="$(git rev-parse HEAD)"
+          release_date="$(date -u +'%Y%m%d')"
+          release_title="${short_sha}-${release_date}"
+          release_tag="release-${release_title}"
+          image_name="$(echo "${GITHUB_REPOSITORY#*/}" | tr '[:upper:]' '[:lower:]')"
+          docker_tag="${release_tag}"
+          image_ref="${image_name}:${docker_tag}"
+          asset_name="${image_name}-${docker_tag}-${short_sha}.tar.gz"
+
+          echo "release_title=${release_title}" >> "${GITHUB_OUTPUT}"
+          echo "release_tag=${release_tag}" >> "${GITHUB_OUTPUT}"
+          echo "image_ref=${image_ref}" >> "${GITHUB_OUTPUT}"
+          echo "asset_name=${asset_name}" >> "${GITHUB_OUTPUT}"
+          echo "full_sha=${full_sha}" >> "${GITHUB_OUTPUT}"
+
+      - name: Build docker image for release asset
+        run: docker build --pull --no-cache --tag "${{ steps.metadata.outputs.image_ref }}" .
+
+      - name: Export docker image archive
+        shell: bash
+        run: |
+          mkdir -p dist
+          docker save "${{ steps.metadata.outputs.image_ref }}" | gzip > "dist/${{ steps.metadata.outputs.asset_name }}"
+
+      - name: Create or update GitHub release and upload asset
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.metadata.outputs.release_tag }}
+          target_commitish: ${{ steps.metadata.outputs.full_sha }}
+          name: ${{ steps.metadata.outputs.release_title }}
+          files: dist/${{ steps.metadata.outputs.asset_name }}
+          overwrite_files: true
+          fail_on_unmatched_files: true
