@@ -1,6 +1,6 @@
 # claude-openai-bridge（Rust + Salvo）
 
-`claude-openai-bridge` 是对 `claude-code-proxy` 的 Rust 重写版本，HTTP 框架使用 **Salvo**。
+让claude code cli可以使用openai api格式的llm api。
 
 它接收 Claude 兼容请求（主要是 `/v1/messages`），并转发到 OpenAI 兼容上游接口（`/chat/completions`）。
 
