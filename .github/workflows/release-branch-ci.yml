@@ -1,0 +1,45 @@
+name: Release Branch CI
+
+on:
+  push:
+    branches:
+      - release
+      - release/**
+  pull_request:
+    branches:
+      - release
+      - release/**
+  workflow_dispatch:
+
+jobs:
+  rust-ci:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Run cargo check
+        run: cargo check
+
+      - name: Run cargo test
+        run: cargo test
+
+      - name: Run cargo clippy
+        run: cargo clippy --all-targets --all-features
+
+  docker-build:
+    runs-on: ubuntu-latest
+    needs:
+      - rust-ci
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Build docker image
+        run: docker build --pull --no-cache --tag bridge-ci:${{ github.sha }} .
