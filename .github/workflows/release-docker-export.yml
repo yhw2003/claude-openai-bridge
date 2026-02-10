@@ -1,0 +1,79 @@
+name: Release Docker Export
+
+on:
+  release:
+    types:
+      - published
+      - edited
+  workflow_dispatch:
+    inputs:
+      tag_name:
+        description: Existing release tag (for example: v0.1.0)
+        required: true
+        type: string
+
+jobs:
+  build-and-upload-image:
+    if: ${{ github.event_name == 'workflow_dispatch' || (!github.event.release.draft && (github.event.action != 'edited' || github.actor != 'github-actions[bot]')) }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Compute release metadata
+        id: metadata
+        env:
+          INPUT_TAG_NAME: ${{ github.event.inputs.tag_name }}
+          RELEASE_TAG_NAME: ${{ github.event.release.tag_name }}
+          RELEASE_UPDATED_AT: ${{ github.event.release.updated_at }}
+        shell: bash
+        run: |
+          tag_name="${RELEASE_TAG_NAME:-${INPUT_TAG_NAME}}"
+          if [ -z "${tag_name}" ]; then
+            echo "tag_name is required" >&2
+            exit 1
+          fi
+
+          release_updated_at="${RELEASE_UPDATED_AT}"
+          if [ -z "${release_updated_at}" ]; then
+            release_updated_at="$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+          fi
+
+          image_name="$(echo "${GITHUB_REPOSITORY#*/}" | tr '[:upper:]' '[:lower:]')"
+          docker_tag="$(echo "${tag_name}" | tr '/ ' '--')"
+          tag_commit="$(git rev-list -n 1 "${tag_name}")"
+          short_sha="$(git rev-parse --short "${tag_commit}")"
+          release_date="$(date -u -d "${release_updated_at}" +'%Y%m%d' 2>/dev/null || date -u +'%Y%m%d')"
+
+          release_title="${short_sha}-${release_date}"
+          image_ref="${image_name}:${docker_tag}"
+          asset_name="${image_name}-${docker_tag}-${short_sha}.tar.gz"
+
+          echo "tag_name=${tag_name}" >> "${GITHUB_OUTPUT}"
+          echo "release_title=${release_title}" >> "${GITHUB_OUTPUT}"
+          echo "image_ref=${image_ref}" >> "${GITHUB_OUTPUT}"
+          echo "asset_name=${asset_name}" >> "${GITHUB_OUTPUT}"
+
+      - name: Build docker image
+        run: docker build --pull --no-cache --tag "${{ steps.metadata.outputs.image_ref }}" .
+
+      - name: Export docker image archive
+        shell: bash
+        run: |
+          mkdir -p dist
+          docker save "${{ steps.metadata.outputs.image_ref }}" | gzip > "dist/${{ steps.metadata.outputs.asset_name }}"
+
+      - name: Update release title and upload image archive
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.metadata.outputs.tag_name }}
+          name: ${{ steps.metadata.outputs.release_title }}
+          files: dist/${{ steps.metadata.outputs.asset_name }}
+          overwrite_files: true
+          fail_on_unmatched_files: true

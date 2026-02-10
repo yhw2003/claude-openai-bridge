@@ -15,7 +15,8 @@ RUN cargo build --release --locked --target x86_64-unknown-linux-musl
 
 # 2) Build the real binary
 COPY src ./src
-RUN cargo build --release --locked --target x86_64-unknown-linux-musl
+RUN find src -type f -exec touch {} + \
+    && cargo build --release --locked --target x86_64-unknown-linux-musl
 RUN strip target/x86_64-unknown-linux-musl/release/claude-openai-bridge
 
 # Minimal runtime image
