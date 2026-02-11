@@ -3,7 +3,7 @@
 # Build a small, fully-static binary (musl) and run it in scratch.
 FROM --platform=$BUILDPLATFORM rust:1.93-alpine AS builder
 
-RUN apk add --no-cache musl-dev build-base
+RUN apk add --no-cache musl-dev build-base ca-certificates
 RUN rustup target add x86_64-unknown-linux-musl
 
 WORKDIR /app
@@ -22,6 +22,9 @@ RUN strip target/x86_64-unknown-linux-musl/release/claude-openai-bridge
 # Minimal runtime image
 FROM scratch
 COPY --from=builder /app/target/x86_64-unknown-linux-musl/release/claude-openai-bridge /claude-openai-bridge
+COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
+
+ENV SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt
 
 EXPOSE 8082
 USER 10001:10001
