@@ -10,8 +10,6 @@ pub struct Config {
     pub host: String,
     pub port: u16,
     pub log_level: String,
-    pub max_tokens_limit: u32,
-    pub min_tokens_limit: u32,
     pub request_timeout: u64,
     pub stream_request_timeout: Option<u64>,
     pub request_body_max_size: usize,
@@ -35,8 +33,6 @@ impl Config {
             host: env::var("HOST").unwrap_or_else(|_| "0.0.0.0".to_string()),
             port: env_u16("PORT", 8082),
             log_level: env::var("LOG_LEVEL").unwrap_or_else(|_| "INFO".to_string()),
-            max_tokens_limit: env_u32("MAX_TOKENS_LIMIT", 4096),
-            min_tokens_limit: env_u32("MIN_TOKENS_LIMIT", 100),
             request_timeout: env_u64("REQUEST_TIMEOUT", 90),
             stream_request_timeout: env_optional_u64("STREAM_REQUEST_TIMEOUT"),
             request_body_max_size: env_usize("REQUEST_BODY_MAX_SIZE", 16 * 1024 * 1024),
@@ -78,13 +74,6 @@ fn env_u16(key: &str, default: u16) -> u16 {
     env::var(key)
         .ok()
         .and_then(|value| value.parse::<u16>().ok())
-        .unwrap_or(default)
-}
-
-fn env_u32(key: &str, default: u32) -> u32 {
-    env::var(key)
-        .ok()
-        .and_then(|value| value.parse::<u32>().ok())
         .unwrap_or(default)
 }
 

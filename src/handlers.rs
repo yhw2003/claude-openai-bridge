@@ -175,7 +175,6 @@ pub async fn root(res: &mut Response) {
         "status": "running",
         "config": {
             "openai_base_url": config.openai_base_url,
-            "max_tokens_limit": config.max_tokens_limit,
             "api_key_configured": !config.openai_api_key.is_empty(),
             "client_api_key_validation": config.anthropic_api_key.is_some(),
             "big_model": config.big_model,

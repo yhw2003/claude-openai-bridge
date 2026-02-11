@@ -5,8 +5,6 @@ mod tool_result;
 mod tools;
 mod user;
 
-use std::cmp::{max, min};
-
 use serde_json::{Value, json};
 use tracing::{debug, trace};
 
@@ -35,7 +33,7 @@ pub fn convert_claude_to_openai(request: &ClaudeMessagesRequest, config: &Config
     push_system_message(request, &mut openai_messages);
     convert_message_list(&request.messages, &mut openai_messages);
 
-    let mut openai_request = build_request_base(request, config, mapped_model, openai_messages);
+    let mut openai_request = build_request_base(request, mapped_model, openai_messages);
     add_optional_request_fields(request, &mut openai_request);
     add_tools(request, &mut openai_request);
     add_tool_choice(request, &mut openai_request);
@@ -118,19 +116,13 @@ fn convert_message_list(messages: &[ClaudeMessage], openai_messages: &mut Vec<Va
 
 fn build_request_base(
     request: &ClaudeMessagesRequest,
-    config: &Config,
     mapped_model: String,
     openai_messages: Vec<Value>,
 ) -> Value {
-    let bounded_tokens = min(
-        max(request.max_tokens, config.min_tokens_limit),
-        config.max_tokens_limit,
-    );
-
     json!({
         "model": mapped_model,
         "messages": openai_messages,
-        "max_tokens": bounded_tokens,
+        "max_tokens": request.max_tokens,
         "temperature": request.temperature.unwrap_or(1.0),
         "stream": request.stream.unwrap_or(false),
     })
@@ -151,8 +143,6 @@ mod tests {
             host: "127.0.0.1".to_string(),
             port: 8082,
             log_level: "INFO".to_string(),
-            max_tokens_limit: 4096,
-            min_tokens_limit: 100,
             request_timeout: 90,
             stream_request_timeout: None,
             request_body_max_size: 16 * 1024 * 1024,

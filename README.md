@@ -68,8 +68,6 @@ ANTHROPIC_BASE_URL=http://localhost:8082 ANTHROPIC_API_KEY="any-value" claude
 - `HOST`（默认：`0.0.0.0`）
 - `PORT`（默认：`8082`）
 - `LOG_LEVEL`（默认：`INFO`）
-- `MAX_TOKENS_LIMIT`（默认：`4096`）
-- `MIN_TOKENS_LIMIT`（默认：`100`）
 - `REQUEST_TIMEOUT`（默认：`90`，非流式请求超时）
 - `STREAM_REQUEST_TIMEOUT`（可选；>0 时生效，流式请求总超时）
 - `REQUEST_BODY_MAX_SIZE`（默认：`16777216`，16MB）
@@ -84,6 +82,12 @@ ANTHROPIC_BASE_URL=http://localhost:8082 ANTHROPIC_API_KEY="any-value" claude
 
 规则：环境变量前缀 `CUSTOM_HEADER_` 去掉后，`_` 会转换为 `-`。
 
+### 关于请求与 Token 控制
+
+- 本服务不再提供 `max_tokens` 上下限配置。
+- `max_tokens` 由下游调用方决定，并原样透传到上游。
+- `REQUEST_TIMEOUT` / `STREAM_REQUEST_TIMEOUT` / `REQUEST_BODY_MAX_SIZE` 仅用于请求超时与报文大小保护，不参与 token 裁剪。
+
 ## 转换行为说明
 
 ### 请求转换（Claude -> OpenAI）
@@ -92,7 +96,7 @@ ANTHROPIC_BASE_URL=http://localhost:8082 ANTHROPIC_API_KEY="any-value" claude
 - `stop_sequences` -> `stop`
 - `top_p` 透传
 - `temperature` 默认 `1.0`
-- `max_tokens` 会被限制在 `[MIN_TOKENS_LIMIT, MAX_TOKENS_LIMIT]`
+- `max_tokens` 原样透传（由下游控制）
 - `tools[].input_schema` -> OpenAI `tools[].function.parameters`
 - `tool_choice`：
   - `auto` / `any` -> `auto`
