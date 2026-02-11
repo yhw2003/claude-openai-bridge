@@ -3,7 +3,8 @@ use reqwest::header::{
 };
 use reqwest::Client;
 use serde_json::Value;
-use tracing::warn;
+use std::time::Duration;
+use tracing::{error, warn};
 
 use crate::config::Config;
 use crate::errors::{classify_openai_error, extract_error_message_from_body, UpstreamError};
@@ -18,14 +19,19 @@ pub struct UpstreamClient {
 impl UpstreamClient {
     pub fn new(config: Config) -> Result<Self, String> {
         let client = Client::builder()
-            .timeout(std::time::Duration::from_secs(config.request_timeout))
             .build()
             .map_err(|error| format!("failed to initialize upstream HTTP client: {error}"))?;
         Ok(Self { client, config })
     }
 
     pub async fn chat_completion(&self, body: &Value) -> Result<Value, UpstreamError> {
-        let response = self.send_chat_request(body).await?;
+        let response = self
+            .send_chat_request(
+                body,
+                Some(Duration::from_secs(self.config.request_timeout)),
+                "non_stream",
+            )
+            .await?;
         response.json::<Value>().await.map_err(|error| UpstreamError {
             status: salvo::http::StatusCode::BAD_GATEWAY,
             message: classify_openai_error(&format!("failed to parse upstream JSON response: {error}")),
@@ -36,10 +42,19 @@ impl UpstreamClient {
         &self,
         body: &Value,
     ) -> Result<reqwest::Response, UpstreamError> {
-        self.send_chat_request(body).await
+        let stream_timeout = self
+            .config
+            .stream_request_timeout
+            .map(Duration::from_secs);
+        self.send_chat_request(body, stream_timeout, "stream").await
     }
 
-    async fn send_chat_request(&self, body: &Value) -> Result<reqwest::Response, UpstreamError> {
+    async fn send_chat_request(
+        &self,
+        body: &Value,
+        timeout: Option<Duration>,
+        request_kind: &'static str,
+    ) -> Result<reqwest::Response, UpstreamError> {
         let url = format!(
             "{}/chat/completions",
             self.config.openai_base_url.trim_end_matches('/')
@@ -55,13 +70,14 @@ impl UpstreamClient {
             request_builder = request_builder.query(&[("api-version", api_version)]);
         }
 
+        if let Some(duration) = timeout {
+            request_builder = request_builder.timeout(duration);
+        }
+
         let response = request_builder
             .send()
             .await
-            .map_err(|error| UpstreamError {
-                status: salvo::http::StatusCode::BAD_GATEWAY,
-                message: classify_openai_error(&format!("upstream request failed: {error}")),
-            })?;
+            .map_err(|error| build_send_error(error, timeout, request_kind))?;
 
         if response.status().is_success() {
             return Ok(response);
@@ -76,6 +92,47 @@ impl UpstreamClient {
             message: classify_openai_error(&raw_message),
         })
     }
+}
+
+fn build_send_error(
+    error: reqwest::Error,
+    timeout: Option<Duration>,
+    request_kind: &'static str,
+) -> UpstreamError {
+    log_send_stage_error(&error, timeout, request_kind);
+    UpstreamError {
+        status: salvo::http::StatusCode::BAD_GATEWAY,
+        message: classify_openai_error(&format!("upstream request failed: {error}")),
+    }
+}
+
+fn log_send_stage_error(error: &reqwest::Error, timeout: Option<Duration>, request_kind: &str) {
+    let timeout_secs = timeout.map(|value| value.as_secs());
+
+    if error.is_timeout() {
+        error!(
+            phase = "upstream_connect_timeout",
+            request_kind,
+            timeout_secs = ?timeout_secs,
+            "Upstream timeout before response headers"
+        );
+        return;
+    }
+
+    if error.is_connect() {
+        error!(
+            phase = "upstream_connect_error",
+            request_kind,
+            "Upstream connection failed before response headers: {error}"
+        );
+        return;
+    }
+
+    error!(
+        phase = "upstream_request_error",
+        request_kind,
+        "Upstream request failed before response headers: {error}"
+    );
 }
 
 fn build_upstream_headers(config: &Config) -> HeaderMap {

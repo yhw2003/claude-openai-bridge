@@ -13,6 +13,7 @@ pub struct Config {
     pub max_tokens_limit: u32,
     pub min_tokens_limit: u32,
     pub request_timeout: u64,
+    pub stream_request_timeout: Option<u64>,
     pub request_body_max_size: usize,
     pub big_model: String,
     pub middle_model: String,
@@ -37,6 +38,7 @@ impl Config {
             max_tokens_limit: env_u32("MAX_TOKENS_LIMIT", 4096),
             min_tokens_limit: env_u32("MIN_TOKENS_LIMIT", 100),
             request_timeout: env_u64("REQUEST_TIMEOUT", 90),
+            stream_request_timeout: env_optional_u64("STREAM_REQUEST_TIMEOUT"),
             request_body_max_size: env_usize("REQUEST_BODY_MAX_SIZE", 16 * 1024 * 1024),
             big_model: env::var("BIG_MODEL").unwrap_or_else(|_| "gpt-4o".to_string()),
             middle_model: env::var("MIDDLE_MODEL").unwrap_or_else(|_| {
@@ -92,6 +94,13 @@ fn env_u64(key: &str, default: u64) -> u64 {
         .ok()
         .and_then(|value| value.parse::<u64>().ok())
         .unwrap_or(default)
+}
+
+fn env_optional_u64(key: &str) -> Option<u64> {
+    env::var(key)
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .filter(|value| *value > 0)
 }
 
 fn env_usize(key: &str, default: usize) -> usize {

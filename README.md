@@ -67,8 +67,14 @@ ANTHROPIC_BASE_URL=http://localhost:8082 ANTHROPIC_API_KEY="any-value" claude
   - `MAX_TOKENS_LIMIT`
   - `MIN_TOKENS_LIMIT`
   - `REQUEST_TIMEOUT`
+  - `STREAM_REQUEST_TIMEOUT`
   - `REQUEST_BODY_MAX_SIZE`
   - `CUSTOM_HEADER_*`
+
+其中：
+
+- `REQUEST_TIMEOUT`：非流式请求（普通 JSON 响应）的超时秒数，默认 `90`。
+- `STREAM_REQUEST_TIMEOUT`：流式请求超时秒数（可选）。未设置时不对整条流施加总超时，避免长时间输出被 `REQUEST_TIMEOUT` 提前中断。
 
 ## 开发与验证
 

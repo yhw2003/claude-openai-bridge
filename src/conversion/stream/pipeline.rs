@@ -1,7 +1,7 @@
 use futures_util::StreamExt;
 use salvo::http::body::BodySender;
 use serde_json::Value;
-use tracing::warn;
+use tracing::{error, warn};
 use uuid::Uuid;
 
 use crate::conversion::stream::helpers::{
@@ -34,6 +34,7 @@ pub async fn stream_openai_to_claude_sse(
     while let Some(chunk_result) = upstream_stream.next().await {
         let Ok(chunk) = chunk_result else {
             if let Some(error) = chunk_result.err() {
+                log_stream_read_error(&error);
                 let _ = send_error_sse(
                     &mut sender,
                     &format!("streaming error from upstream: {error}"),
@@ -52,6 +53,21 @@ pub async fn stream_openai_to_claude_sse(
     }
 
     let _ = send_stop_sequence(&mut sender, &state).await;
+}
+
+fn log_stream_read_error(error: &reqwest::Error) {
+    if error.is_timeout() {
+        error!(
+            phase = "upstream_stream_timeout",
+            "Streaming interrupted by upstream read timeout"
+        );
+        return;
+    }
+
+    error!(
+        phase = "upstream_stream_error",
+        "Streaming interrupted while reading upstream body: {error}"
+    );
 }
 
 fn message_id() -> String {
