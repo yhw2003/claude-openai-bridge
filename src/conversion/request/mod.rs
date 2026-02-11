@@ -16,7 +16,9 @@ use crate::models::{ClaudeMessage, ClaudeMessagesRequest};
 use assistant::convert_claude_assistant_message;
 use models::map_claude_model_to_openai;
 use system::extract_system_text;
-use tool_result::{convert_claude_tool_results, is_tool_result_user_message};
+use tool_result::{
+    convert_claude_tool_results, has_non_tool_result_content, is_tool_result_user_message,
+};
 use tools::{add_optional_request_fields, add_tool_choice, add_tools};
 use user::convert_claude_user_message;
 
@@ -96,34 +98,22 @@ fn push_system_message(request: &ClaudeMessagesRequest, openai_messages: &mut Ve
 }
 
 fn convert_message_list(messages: &[ClaudeMessage], openai_messages: &mut Vec<Value>) {
-    let mut index = 0usize;
-    while index < messages.len() {
-        push_message_with_tool_results(&messages[index], messages, &mut index, openai_messages);
-        index += 1;
-    }
-}
+    for message in messages {
+        if message.role == ROLE_USER {
+            if is_tool_result_user_message(message) {
+                openai_messages.extend(convert_claude_tool_results(message));
+            }
 
-fn push_message_with_tool_results(
-    message: &ClaudeMessage,
-    messages: &[ClaudeMessage],
-    index: &mut usize,
-    openai_messages: &mut Vec<Value>,
-) {
-    if message.role == ROLE_USER {
-        openai_messages.push(convert_claude_user_message(message));
-        return;
-    }
-    if message.role != ROLE_ASSISTANT {
-        return;
-    }
+            if has_non_tool_result_content(message) {
+                openai_messages.push(convert_claude_user_message(message));
+            }
+            continue;
+        }
 
-    openai_messages.push(convert_claude_assistant_message(message));
-    if *index + 1 >= messages.len() || !is_tool_result_user_message(&messages[*index + 1]) {
-        return;
+        if message.role == ROLE_ASSISTANT {
+            openai_messages.push(convert_claude_assistant_message(message));
+        }
     }
-
-    openai_messages.extend(convert_claude_tool_results(&messages[*index + 1]));
-    *index += 1;
 }
 
 fn build_request_base(
@@ -144,4 +134,98 @@ fn build_request_base(
         "temperature": request.temperature.unwrap_or(1.0),
         "stream": request.stream.unwrap_or(false),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::Config;
+    use serde_json::json;
+
+    fn test_config() -> Config {
+        Config {
+            openai_api_key: "sk-test".to_string(),
+            anthropic_api_key: None,
+            openai_base_url: "https://api.openai.com/v1".to_string(),
+            azure_api_version: None,
+            host: "127.0.0.1".to_string(),
+            port: 8082,
+            log_level: "INFO".to_string(),
+            max_tokens_limit: 4096,
+            min_tokens_limit: 100,
+            request_timeout: 90,
+            stream_request_timeout: None,
+            request_body_max_size: 16 * 1024 * 1024,
+            big_model: "gpt-4o".to_string(),
+            middle_model: "gpt-4o".to_string(),
+            small_model: "gpt-4o-mini".to_string(),
+            custom_headers: Default::default(),
+        }
+    }
+
+    #[test]
+    fn preserves_tool_result_and_non_tool_user_content() {
+        let request = ClaudeMessagesRequest {
+            model: "claude-3-5-sonnet-20241022".to_string(),
+            max_tokens: 256,
+            messages: vec![
+                ClaudeMessage {
+                    role: ROLE_ASSISTANT.to_string(),
+                    content: Some(json!([
+                        {
+                            "type": "tool_use",
+                            "id": "call_test123",
+                            "name": "Bash",
+                            "input": {"command": "cargo fmt"}
+                        }
+                    ])),
+                },
+                ClaudeMessage {
+                    role: ROLE_USER.to_string(),
+                    content: Some(json!([
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": "call_test123",
+                            "content": "ok"
+                        },
+                        {
+                            "type": "text",
+                            "text": "继续"
+                        }
+                    ])),
+                },
+            ],
+            system: None,
+            stop_sequences: None,
+            stream: Some(false),
+            temperature: Some(1.0),
+            top_p: None,
+            tools: None,
+            tool_choice: None,
+        };
+
+        let converted = convert_claude_to_openai(&request, &test_config());
+        let messages = converted
+            .get("messages")
+            .and_then(Value::as_array)
+            .expect("messages should be an array");
+
+        assert_eq!(messages.len(), 3);
+        assert_eq!(
+            messages[0].get("role").and_then(Value::as_str),
+            Some("assistant")
+        );
+        assert_eq!(
+            messages[1].get("role").and_then(Value::as_str),
+            Some("tool")
+        );
+        assert_eq!(
+            messages[1].get("tool_call_id").and_then(Value::as_str),
+            Some("call_test123")
+        );
+        assert_eq!(
+            messages[2].get("role").and_then(Value::as_str),
+            Some("user")
+        );
+    }
 }

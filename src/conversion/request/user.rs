@@ -1,6 +1,6 @@
 use serde_json::{Value, json};
 
-use crate::constants::{CONTENT_IMAGE, CONTENT_TEXT, ROLE_USER};
+use crate::constants::{CONTENT_IMAGE, CONTENT_TEXT, CONTENT_TOOL_RESULT, ROLE_USER};
 use crate::models::ClaudeMessage;
 
 pub fn convert_claude_user_message(message: &ClaudeMessage) -> Value {
@@ -32,6 +32,9 @@ fn convert_user_block(block: &Value) -> Option<Value> {
             .get("text")
             .and_then(Value::as_str)
             .map(|text| json!({ "type": "text", "text": text }));
+    }
+    if block_type == CONTENT_TOOL_RESULT {
+        return None;
     }
     if block_type != CONTENT_IMAGE {
         return None;

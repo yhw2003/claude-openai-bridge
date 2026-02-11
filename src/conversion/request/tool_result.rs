@@ -34,6 +34,28 @@ pub fn is_tool_result_user_message(message: &ClaudeMessage) -> bool {
         .any(|block| block.get("type").and_then(Value::as_str) == Some(CONTENT_TOOL_RESULT))
 }
 
+pub fn has_non_tool_result_content(message: &ClaudeMessage) -> bool {
+    if message.role != ROLE_USER {
+        return false;
+    }
+
+    let Some(content) = &message.content else {
+        return false;
+    };
+
+    if content.is_string() {
+        return true;
+    }
+
+    let Some(blocks) = content.as_array() else {
+        return false;
+    };
+
+    blocks
+        .iter()
+        .any(|block| block.get("type").and_then(Value::as_str) != Some(CONTENT_TOOL_RESULT))
+}
+
 fn convert_tool_result_block(block: &Value) -> Value {
     let tool_use_id = block
         .get("tool_use_id")
