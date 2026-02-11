@@ -1,13 +1,13 @@
 use salvo::http::StatusCode;
 use salvo::prelude::*;
-use serde_json::{json, Value};
-use tracing::{debug, error};
+use serde_json::{Value, json};
+use tracing::{debug, error, trace};
 
-use crate::constants::{ROLE_USER};
+use crate::constants::ROLE_USER;
 use crate::conversion::request::convert_claude_to_openai;
 use crate::conversion::response::convert_openai_to_claude_response;
 use crate::conversion::stream::stream_openai_to_claude_sse;
-use crate::models::{ClaudeTokenCountRequest, ClaudeMessagesRequest};
+use crate::models::{ClaudeMessagesRequest, ClaudeTokenCountRequest};
 use crate::state::app_state;
 use crate::utils::now_timestamp_string;
 
@@ -36,10 +36,22 @@ pub async fn create_message(req: &mut Request, res: &mut Response) {
         None => return,
     };
 
+    trace!(
+        phase = "downstream_request_full",
+        claude_request = %serde_json::to_string(&request).unwrap_or_default(),
+        "Received downstream request (full)"
+    );
+
     debug!(
-        "Processing request: model={}, stream={}",
-        request.model,
-        request.stream.unwrap_or(false)
+        phase = "downstream_request_summary",
+        claude_model = %request.model,
+        stream = request.stream.unwrap_or(false),
+        max_tokens = request.max_tokens,
+        messages_len = request.messages.len(),
+        has_system = request.system.is_some(),
+        has_tools = request.tools.as_ref().map(|v| !v.is_empty()).unwrap_or(false),
+        has_tool_choice = request.tool_choice.is_some(),
+        "Received downstream request (summary)"
     );
 
     let mut openai_request = convert_claude_to_openai(&request, &state.config);
@@ -86,10 +98,18 @@ pub async fn count_tokens(req: &mut Request, res: &mut Response) {
         }
     };
 
+    trace!(
+        phase = "downstream_token_count_full",
+        claude_request = %serde_json::to_string(&token_request).unwrap_or_default(),
+        "Token counting request (full)"
+    );
+
     debug!(
-        "Token counting request: model={}, messages={}",
-        token_request.model,
-        token_request.messages.len()
+        phase = "downstream_token_count_summary",
+        claude_model = %token_request.model,
+        messages_len = token_request.messages.len(),
+        has_system = token_request.system.is_some(),
+        "Token counting request (summary)"
     );
 
     let estimated_tokens = estimate_input_tokens(&token_request);
@@ -171,7 +191,10 @@ pub async fn root(res: &mut Response) {
     })));
 }
 
-async fn parse_messages_request(req: &mut Request, res: &mut Response) -> Option<ClaudeMessagesRequest> {
+async fn parse_messages_request(
+    req: &mut Request,
+    res: &mut Response,
+) -> Option<ClaudeMessagesRequest> {
     let max_size = app_state().config.request_body_max_size;
     match req
         .parse_json_with_max_size::<ClaudeMessagesRequest>(max_size)
@@ -193,7 +216,11 @@ async fn handle_streaming_request(
     openai_request["stream"] = Value::Bool(true);
     openai_request["stream_options"] = json!({ "include_usage": true });
 
-    let upstream_response = match app_state().upstream.chat_completion_stream(openai_request).await {
+    let upstream_response = match app_state()
+        .upstream
+        .chat_completion_stream(openai_request)
+        .await
+    {
         Ok(value) => value,
         Err(error) => {
             error!("Streaming upstream error: {}", error.message);
@@ -238,9 +265,8 @@ fn validate_client_api_key_header(req: &Request) -> Result<(), String> {
         .get("authorization")
         .and_then(|value| value.to_str().ok());
 
-    let provided_key = x_api_key.or_else(|| {
-        authorization.and_then(|auth_header| auth_header.strip_prefix("Bearer "))
-    });
+    let provided_key = x_api_key
+        .or_else(|| authorization.and_then(|auth_header| auth_header.strip_prefix("Bearer ")));
 
     if config.validate_client_api_key(provided_key) {
         Ok(())

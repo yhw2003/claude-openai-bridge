@@ -16,9 +16,10 @@ pub fn map_claude_model_to_openai(claude_model: &str, config: &Config) -> String
 }
 
 fn is_upstream_native_model(model: &str) -> bool {
-    model.starts_with("gpt-")
-        || model.starts_with("o1-")
-        || model.starts_with("ep-")
-        || model.starts_with("doubao-")
-        || model.starts_with("deepseek-")
+    let lowered = model.to_lowercase();
+    lowered.starts_with("gpt-")
+        || lowered.starts_with("o1-")
+        || lowered.starts_with("ep-")
+        || lowered.starts_with("doubao-")
+        || lowered.starts_with("deepseek-")
 }

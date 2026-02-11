@@ -4,7 +4,7 @@ use tracing::{info, warn};
 
 use crate::config::Config;
 use crate::handlers;
-use crate::state::{set_app_state, AppState};
+use crate::state::{AppState, set_app_state};
 use crate::upstream::UpstreamClient;
 use crate::utils::init_tracing;
 
@@ -25,7 +25,9 @@ pub async fn run() {
         config.host, config.port
     );
 
-    let acceptor = TcpListener::new((config.host.as_str(), config.port)).bind().await;
+    let acceptor = TcpListener::new((config.host.as_str(), config.port))
+        .bind()
+        .await;
     Server::new(acceptor).serve(handlers::router()).await;
 }
 

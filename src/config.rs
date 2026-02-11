@@ -41,9 +41,8 @@ impl Config {
             stream_request_timeout: env_optional_u64("STREAM_REQUEST_TIMEOUT"),
             request_body_max_size: env_usize("REQUEST_BODY_MAX_SIZE", 16 * 1024 * 1024),
             big_model: env::var("BIG_MODEL").unwrap_or_else(|_| "gpt-4o".to_string()),
-            middle_model: env::var("MIDDLE_MODEL").unwrap_or_else(|_| {
-                env::var("BIG_MODEL").unwrap_or_else(|_| "gpt-4o".to_string())
-            }),
+            middle_model: env::var("MIDDLE_MODEL")
+                .unwrap_or_else(|_| env::var("BIG_MODEL").unwrap_or_else(|_| "gpt-4o".to_string())),
             small_model: env::var("SMALL_MODEL").unwrap_or_else(|_| "gpt-4o-mini".to_string()),
             custom_headers: collect_custom_headers(),
         })

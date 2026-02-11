@@ -1,13 +1,13 @@
+use reqwest::Client;
 use reqwest::header::{
     AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderName, HeaderValue, USER_AGENT,
 };
-use reqwest::Client;
 use serde_json::Value;
 use std::time::Duration;
 use tracing::{error, warn};
 
 use crate::config::Config;
-use crate::errors::{classify_openai_error, extract_error_message_from_body, UpstreamError};
+use crate::errors::{UpstreamError, classify_openai_error, extract_error_message_from_body};
 use crate::utils::to_salvo_status;
 
 #[derive(Clone, Debug)]
@@ -32,20 +32,22 @@ impl UpstreamClient {
                 "non_stream",
             )
             .await?;
-        response.json::<Value>().await.map_err(|error| UpstreamError {
-            status: salvo::http::StatusCode::BAD_GATEWAY,
-            message: classify_openai_error(&format!("failed to parse upstream JSON response: {error}")),
-        })
+        response
+            .json::<Value>()
+            .await
+            .map_err(|error| UpstreamError {
+                status: salvo::http::StatusCode::BAD_GATEWAY,
+                message: classify_openai_error(&format!(
+                    "failed to parse upstream JSON response: {error}"
+                )),
+            })
     }
 
     pub async fn chat_completion_stream(
         &self,
         body: &Value,
     ) -> Result<reqwest::Response, UpstreamError> {
-        let stream_timeout = self
-            .config
-            .stream_request_timeout
-            .map(Duration::from_secs);
+        let stream_timeout = self.config.stream_request_timeout.map(Duration::from_secs);
         self.send_chat_request(body, stream_timeout, "stream").await
     }
 
@@ -122,16 +124,14 @@ fn log_send_stage_error(error: &reqwest::Error, timeout: Option<Duration>, reque
     if error.is_connect() {
         error!(
             phase = "upstream_connect_error",
-            request_kind,
-            "Upstream connection failed before response headers: {error}"
+            request_kind, "Upstream connection failed before response headers: {error}"
         );
         return;
     }
 
     error!(
         phase = "upstream_request_error",
-        request_kind,
-        "Upstream request failed before response headers: {error}"
+        request_kind, "Upstream request failed before response headers: {error}"
     );
 }
 

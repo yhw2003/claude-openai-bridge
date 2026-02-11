@@ -1,4 +1,4 @@
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::constants::{CONTENT_TEXT, CONTENT_TOOL_RESULT, ROLE_TOOL, ROLE_USER};
 use crate::models::ClaudeMessage;
@@ -89,7 +89,10 @@ fn extract_item_text(item: &Value) -> Option<String> {
         .map(ToOwned::to_owned)
 }
 
-fn normalize_object_tool_content(content: &Value, object: &serde_json::Map<String, Value>) -> String {
+fn normalize_object_tool_content(
+    content: &Value,
+    object: &serde_json::Map<String, Value>,
+) -> String {
     if object.get("type").and_then(Value::as_str) == Some(CONTENT_TEXT) {
         return object
             .get("text")

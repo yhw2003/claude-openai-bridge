@@ -21,16 +21,20 @@ pub fn classify_openai_error(detail: &str) -> String {
     }
 
     if lowered.contains("rate_limit") || lowered.contains("quota") {
-        return "Rate limit exceeded. Please retry later or upgrade your upstream quota.".to_string();
+        return "Rate limit exceeded. Please retry later or upgrade your upstream quota."
+            .to_string();
     }
 
-    if lowered.contains("model") && (lowered.contains("not found") || lowered.contains("does not exist"))
+    if lowered.contains("model")
+        && (lowered.contains("not found") || lowered.contains("does not exist"))
     {
-        return "Model not found. Please check BIG_MODEL / MIDDLE_MODEL / SMALL_MODEL mappings.".to_string();
+        return "Model not found. Please check BIG_MODEL / MIDDLE_MODEL / SMALL_MODEL mappings."
+            .to_string();
     }
 
     if lowered.contains("billing") || lowered.contains("payment") {
-        return "Billing issue detected. Please verify upstream account billing status.".to_string();
+        return "Billing issue detected. Please verify upstream account billing status."
+            .to_string();
     }
 
     detail.to_string()

@@ -1,14 +1,14 @@
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ClaudeMessage {
     pub role: String,
     #[serde(default)]
     pub content: Option<Value>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ClaudeMessagesRequest {
     pub model: String,
     pub max_tokens: u32,
@@ -29,7 +29,7 @@ pub struct ClaudeMessagesRequest {
     pub tool_choice: Option<Value>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ClaudeTokenCountRequest {
     pub model: String,
     pub messages: Vec<ClaudeMessage>,

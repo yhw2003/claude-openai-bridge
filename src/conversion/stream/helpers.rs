@@ -56,7 +56,11 @@ pub fn tool_call_index(tool_call_delta: &Value) -> usize {
         .unwrap_or(0) as usize
 }
 
-pub fn update_tool_identity(tool_call_delta: &Value, state: &mut StreamState, tool_call_index: usize) {
+pub fn update_tool_identity(
+    tool_call_delta: &Value,
+    state: &mut StreamState,
+    tool_call_index: usize,
+) {
     let tool_call_state = state.tool_calls.entry(tool_call_index).or_default();
 
     if let Some(id) = tool_call_delta.get("id").and_then(Value::as_str) {

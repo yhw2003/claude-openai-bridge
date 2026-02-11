@@ -1,10 +1,10 @@
 use salvo::http::body::BodySender;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::constants::{
-    CONTENT_TEXT, DELTA_INPUT_JSON, DELTA_TEXT, EVENT_CONTENT_BLOCK_DELTA, EVENT_CONTENT_BLOCK_START,
-    EVENT_CONTENT_BLOCK_STOP, EVENT_MESSAGE_DELTA, EVENT_MESSAGE_START, EVENT_MESSAGE_STOP,
-    EVENT_PING, ROLE_ASSISTANT,
+    CONTENT_TEXT, DELTA_INPUT_JSON, DELTA_TEXT, EVENT_CONTENT_BLOCK_DELTA,
+    EVENT_CONTENT_BLOCK_START, EVENT_CONTENT_BLOCK_STOP, EVENT_MESSAGE_DELTA, EVENT_MESSAGE_START,
+    EVENT_MESSAGE_STOP, EVENT_PING, ROLE_ASSISTANT,
 };
 use crate::conversion::stream::state::StreamState;
 
@@ -103,7 +103,10 @@ pub async fn send_tool_json_delta(
     .await
 }
 
-pub async fn send_stop_sequence(sender: &mut BodySender, state: &StreamState) -> std::io::Result<()> {
+pub async fn send_stop_sequence(
+    sender: &mut BodySender,
+    state: &StreamState,
+) -> std::io::Result<()> {
     send_sse(
         sender,
         EVENT_CONTENT_BLOCK_STOP,
@@ -112,7 +115,8 @@ pub async fn send_stop_sequence(sender: &mut BodySender, state: &StreamState) ->
     .await?;
 
     for tool_call_state in state.tool_calls.values() {
-        let Some(claude_index) = crate::conversion::stream::state::started_tool_index(tool_call_state)
+        let Some(claude_index) =
+            crate::conversion::stream::state::started_tool_index(tool_call_state)
         else {
             continue;
         };
@@ -139,7 +143,12 @@ pub async fn send_stop_sequence(sender: &mut BodySender, state: &StreamState) ->
     )
     .await?;
 
-    send_sse(sender, EVENT_MESSAGE_STOP, &json!({"type": EVENT_MESSAGE_STOP})).await
+    send_sse(
+        sender,
+        EVENT_MESSAGE_STOP,
+        &json!({"type": EVENT_MESSAGE_STOP}),
+    )
+    .await
 }
 
 pub async fn send_error_sse(sender: &mut BodySender, message: &str) -> std::io::Result<()> {

@@ -9,8 +9,8 @@ use crate::conversion::stream::helpers::{
     tool_call_index, tool_started, update_finish_reason, update_tool_identity, update_usage,
 };
 use crate::conversion::stream::sse::{
-    send_error_sse, send_start_sequence, send_stop_sequence, send_text_delta, send_tool_block_start,
-    send_tool_json_delta,
+    send_error_sse, send_start_sequence, send_stop_sequence, send_text_delta,
+    send_tool_block_start, send_tool_json_delta,
 };
 use crate::conversion::stream::state::StreamState;
 
@@ -184,7 +184,13 @@ async fn maybe_start_tool_block(
     tool_call_state.claude_index = Some(claude_index);
     tool_call_state.started = true;
 
-    send_tool_block_start(sender, claude_index, &tool_call_state.id, &tool_call_state.name).await
+    send_tool_block_start(
+        sender,
+        claude_index,
+        &tool_call_state.id,
+        &tool_call_state.name,
+    )
+    .await
 }
 
 async fn send_tool_json_if_ready(

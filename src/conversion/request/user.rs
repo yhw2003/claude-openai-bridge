@@ -1,4 +1,4 @@
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::constants::{CONTENT_IMAGE, CONTENT_TEXT, ROLE_USER};
 use crate::models::ClaudeMessage;
@@ -38,7 +38,10 @@ fn convert_user_block(block: &Value) -> Option<Value> {
     }
 
     let source = block.get("source")?.as_object()?;
-    let source_type = source.get("type").and_then(Value::as_str).unwrap_or_default();
+    let source_type = source
+        .get("type")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
     let media_type = source
         .get("media_type")
         .and_then(Value::as_str)

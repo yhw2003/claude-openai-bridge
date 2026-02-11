@@ -1,4 +1,4 @@
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::constants::{CONTENT_TEXT, CONTENT_TOOL_USE, ROLE_ASSISTANT, TOOL_FUNCTION};
 use crate::models::ClaudeMessage;
@@ -34,7 +34,10 @@ fn extract_assistant_parts(blocks: &[Value]) -> (Vec<String>, Vec<Value>) {
     let mut tool_calls = Vec::new();
 
     for block in blocks {
-        let block_type = block.get("type").and_then(Value::as_str).unwrap_or_default();
+        let block_type = block
+            .get("type")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
         if block_type == CONTENT_TEXT {
             push_assistant_text(block, &mut text_parts);
             continue;
@@ -56,7 +59,10 @@ fn push_assistant_text(block: &Value, text_parts: &mut Vec<String>) {
 
 fn push_assistant_tool_call(block: &Value, tool_calls: &mut Vec<Value>) {
     let tool_id = block.get("id").and_then(Value::as_str).unwrap_or_default();
-    let tool_name = block.get("name").and_then(Value::as_str).unwrap_or_default();
+    let tool_name = block
+        .get("name")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
     let tool_input = block.get("input").cloned().unwrap_or_else(|| json!({}));
     let arguments = serde_json::to_string(&tool_input).unwrap_or_else(|_| "{}".to_string());
 

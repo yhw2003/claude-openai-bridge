@@ -7,8 +7,8 @@ mod user;
 
 use std::cmp::{max, min};
 
-use serde_json::{json, Value};
-use tracing::{debug, info};
+use serde_json::{Value, json};
+use tracing::{debug, trace};
 
 use crate::config::Config;
 use crate::constants::{ROLE_ASSISTANT, ROLE_SYSTEM, ROLE_USER};
@@ -22,9 +22,11 @@ use user::convert_claude_user_message;
 
 pub fn convert_claude_to_openai(request: &ClaudeMessagesRequest, config: &Config) -> Value {
     let mapped_model = map_claude_model_to_openai(&request.model, config);
-    info!(
-        "Model routing: claude_model='{}' -> upstream_model='{}'",
-        request.model, mapped_model
+    debug!(
+        phase = "model_routing",
+        claude_model = %request.model,
+        upstream_model = %mapped_model,
+        "Model routing"
     );
     let mut openai_messages: Vec<Value> = Vec::new();
 
@@ -36,7 +38,49 @@ pub fn convert_claude_to_openai(request: &ClaudeMessagesRequest, config: &Config
     add_tools(request, &mut openai_request);
     add_tool_choice(request, &mut openai_request);
 
-    debug!("Converted request for upstream: {}", openai_request);
+    trace!(
+        phase = "upstream_request_full",
+        openai_request = %openai_request,
+        "Converted request for upstream (full)"
+    );
+
+    let messages_len = openai_request
+        .get("messages")
+        .and_then(|value| value.as_array())
+        .map(|value| value.len())
+        .unwrap_or(0);
+    let tools_len = openai_request
+        .get("tools")
+        .and_then(|value| value.as_array())
+        .map(|value| value.len())
+        .unwrap_or(0);
+
+    let upstream_model = openai_request
+        .get("model")
+        .and_then(|value| value.as_str())
+        .unwrap_or("");
+    let stream = openai_request
+        .get("stream")
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false);
+    let max_tokens = openai_request
+        .get("max_tokens")
+        .and_then(|value| value.as_u64());
+    let temperature = openai_request
+        .get("temperature")
+        .and_then(|value| value.as_f64());
+
+    debug!(
+        phase = "upstream_request_summary",
+        upstream_model = %upstream_model,
+        stream,
+        max_tokens = ?max_tokens,
+        temperature = ?temperature,
+        messages_len,
+        tools_len,
+        has_tool_choice = openai_request.get("tool_choice").is_some(),
+        "Converted request for upstream (summary)"
+    );
     openai_request
 }
 
