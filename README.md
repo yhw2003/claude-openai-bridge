@@ -1,19 +1,20 @@
 # claude-openai-bridge（Rust + Salvo）
 
-让claude code cli可以使用openai api格式的llm api。
+让 Claude Code CLI 使用 OpenAI 兼容接口（`/chat/completions`）作为上游。
 
-它接收 Claude 兼容请求（主要是 `/v1/messages`），并转发到 OpenAI 兼容上游接口（`/chat/completions`）。
+本服务接收 Claude 兼容请求（主要是 `POST /v1/messages`），完成请求/响应格式转换后转发到 OpenAI 兼容 API。
 
-## 功能特性
+## 当前功能
 
 - Claude 兼容接口：`POST /v1/messages`
-- Claude 流式 SSE 事件格式转换
-- 工具调用（function/tool call）双向转换
+- Claude 流式 SSE 事件转换（`message_start`/`content_block_delta`/`message_stop` 等）
+- 工具调用双向转换（Claude `tool_use/tool_result` ↔ OpenAI `tool_calls/tool`）
 - 图像输入转换（Claude `base64 image` -> OpenAI `image_url`）
-- 模型映射（`haiku` / `sonnet` / `opus` -> 你配置的上游模型）
-- 可选的客户端 Anthropic API Key 校验
+- 模型映射（`haiku` / `sonnet` / 其他 -> `SMALL_MODEL` / `MIDDLE_MODEL` / `BIG_MODEL`）
+- 上游原生模型直通（`gpt-*`、`o1-*`、`ep-*`、`doubao-*`、`deepseek-*`）
+- 可选客户端 Key 校验（`ANTHROPIC_API_KEY`）
 - Token 估算接口：`POST /v1/messages/count_tokens`
-- 健康检查与连通性测试接口
+- 健康检查和上游连通性检查
 
 ## 接口列表
 
@@ -25,69 +26,122 @@
 
 ## 快速开始
 
-1. 复制配置文件：
+1. 复制配置文件
 
 ```bash
 cp .env.example .env
 ```
 
-2. 至少配置：
+2. 至少配置 `OPENAI_API_KEY`
 
-- `OPENAI_API_KEY`
-
-3. 启动服务：
+3. 启动服务
 
 ```bash
 cargo run
 ```
 
-默认监听地址：`0.0.0.0:8082`
+默认监听：`0.0.0.0:8082`
 
-## 与 Claude Code 搭配使用
+## 与 Claude Code 搭配
 
 ```bash
 ANTHROPIC_BASE_URL=http://localhost:8082 ANTHROPIC_API_KEY="any-value" claude
 ```
 
-如果你在代理 `.env` 中设置了 `ANTHROPIC_API_KEY`，则客户端传入的 key 必须完全一致。
+如果你在代理服务的 `.env` 设置了 `ANTHROPIC_API_KEY`，则客户端传入 key 必须完全一致（支持 `x-api-key` 或 `Authorization: Bearer ...`）。
 
-## 环境变量说明
+## 环境变量
 
-可参考 `.env.example`：
+参考 `.env.example`。
 
-- 必填：`OPENAI_API_KEY`
-- 常用可选：
-  - `OPENAI_BASE_URL`
-  - `BIG_MODEL`
-  - `MIDDLE_MODEL`
-  - `SMALL_MODEL`
-  - `HOST`
-  - `PORT`
-  - `LOG_LEVEL`
-  - `MAX_TOKENS_LIMIT`
-  - `MIN_TOKENS_LIMIT`
-  - `REQUEST_TIMEOUT`
-  - `STREAM_REQUEST_TIMEOUT`
-  - `REQUEST_BODY_MAX_SIZE`
-  - `CUSTOM_HEADER_*`
+### 必填
 
-其中：
+- `OPENAI_API_KEY`
 
-- `REQUEST_TIMEOUT`：非流式请求（普通 JSON 响应）的超时秒数，默认 `90`。
-- `STREAM_REQUEST_TIMEOUT`：流式请求超时秒数（可选）。未设置时不对整条流施加总超时，避免长时间输出被 `REQUEST_TIMEOUT` 提前中断。
+### 常用可选
 
-## 开发与验证
+- `OPENAI_BASE_URL`（默认：`https://api.openai.com/v1`）
+- `AZURE_API_VERSION`（设置后会作为 query 参数 `api-version` 附加到上游请求）
+- `BIG_MODEL`（默认：`gpt-4o`）
+- `MIDDLE_MODEL`（默认：跟随 `BIG_MODEL`，未设置时为 `gpt-4o`）
+- `SMALL_MODEL`（默认：`gpt-4o-mini`）
+- `HOST`（默认：`0.0.0.0`）
+- `PORT`（默认：`8082`）
+- `LOG_LEVEL`（默认：`INFO`）
+- `MAX_TOKENS_LIMIT`（默认：`4096`）
+- `MIN_TOKENS_LIMIT`（默认：`100`）
+- `REQUEST_TIMEOUT`（默认：`90`，非流式请求超时）
+- `STREAM_REQUEST_TIMEOUT`（可选；>0 时生效，流式请求总超时）
+- `REQUEST_BODY_MAX_SIZE`（默认：`16777216`，16MB）
+- `CUSTOM_HEADER_*`（可选，自定义上游请求头）
 
-根据仓库约束，修改后应执行并通过：
+### `CUSTOM_HEADER_*` 说明
+
+例如：
+
+- `CUSTOM_HEADER_X_API_KEY="xxx"` -> 上游头 `X-API-KEY: xxx`
+- `CUSTOM_HEADER_ACCEPT="application/json"` -> 上游头 `ACCEPT: application/json`
+
+规则：环境变量前缀 `CUSTOM_HEADER_` 去掉后，`_` 会转换为 `-`。
+
+## 转换行为说明
+
+### 请求转换（Claude -> OpenAI）
+
+- `system` 文本会转换为 OpenAI `system` 消息
+- `stop_sequences` -> `stop`
+- `top_p` 透传
+- `temperature` 默认 `1.0`
+- `max_tokens` 会被限制在 `[MIN_TOKENS_LIMIT, MAX_TOKENS_LIMIT]`
+- `tools[].input_schema` -> OpenAI `tools[].function.parameters`
+- `tool_choice`：
+  - `auto` / `any` -> `auto`
+  - `tool` + `name` -> 指定函数调用
+- 用户消息中的 `tool_result` 会拆成 OpenAI `tool` 角色消息
+- 混合 `tool_result + text` 的用户消息会同时保留工具结果和普通文本
+
+### 响应转换（OpenAI -> Claude）
+
+- `choices[0].message.content` -> Claude `content[type=text]`
+- `tool_calls` -> Claude `content[type=tool_use]`
+- `finish_reason` 映射：
+  - `length` -> `max_tokens`
+  - `tool_calls` / `function_call` -> `tool_use`
+  - 其他 -> `end_turn`
+- `usage.prompt_tokens/completion_tokens` -> Claude `usage.input_tokens/output_tokens`
+
+### 流式 SSE
+
+- 自动向上游开启：`stream=true` + `stream_options.include_usage=true`
+- 输出 Claude 风格事件：
+  - `message_start`
+  - `content_block_start`
+  - `content_block_delta`
+  - `content_block_stop`
+  - `message_delta`
+  - `message_stop`
+  - `ping`
+- 工具调用参数会累积到完整 JSON 后再发送 `input_json_delta`
+
+## 诊断接口
+
+- `GET /health`：返回服务状态、时间戳、API Key 配置状态等
+- `GET /test-connection`：用 `SMALL_MODEL` 发起最小请求，验证上游可用性
+
+## `count_tokens` 说明
+
+`POST /v1/messages/count_tokens` 当前是**估算**逻辑，不调用上游 tokenizer：
+
+- 统计 `system + messages` 文本字符数
+- 按 `字符数 / 4` 估算
+- 最小返回 `1`
+
+## 开发与校验
+
+修改后建议执行：
 
 ```bash
 cargo check
 cargo test
 cargo clippy --all-targets --all-features
 ```
-
-## 说明
-
-- 默认上游地址为 `https://api.openai.com/v1`。
-- 支持通过 `CUSTOM_HEADER_*` 注入上游请求头。
-- 流式响应事件遵循 Claude SSE 事件结构（如 `message_start`、`content_block_delta` 等）。
