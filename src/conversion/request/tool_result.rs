@@ -1,21 +1,23 @@
-use serde_json::{Value, json};
+use serde::Deserialize;
+use serde_json::Value;
 use tracing::warn;
 
-use crate::constants::{CONTENT_TEXT, CONTENT_TOOL_RESULT, ROLE_TOOL, ROLE_USER};
-use crate::models::ClaudeMessage;
+use crate::constants::{CONTENT_TEXT, ROLE_USER};
+use crate::conversion::request::models::{OpenAiMessage, OpenAiToolMessage};
+use crate::models::{ClaudeContent, ClaudeContentBlock, ClaudeMessage};
 
-pub fn convert_claude_tool_results(message: &ClaudeMessage) -> Vec<Value> {
+pub fn convert_claude_tool_results(message: &ClaudeMessage) -> Vec<OpenAiMessage> {
     let Some(content) = &message.content else {
         return Vec::new();
     };
-    let Some(blocks) = content.as_array() else {
+    let ClaudeContent::Blocks(blocks) = content else {
         return Vec::new();
     };
 
     blocks
         .iter()
-        .filter(|block| block.get("type").and_then(Value::as_str) == Some(CONTENT_TOOL_RESULT))
         .filter_map(convert_tool_result_block)
+        .map(OpenAiMessage::Tool)
         .collect()
 }
 
@@ -26,13 +28,13 @@ pub fn is_tool_result_user_message(message: &ClaudeMessage) -> bool {
     let Some(content) = &message.content else {
         return false;
     };
-    let Some(blocks) = content.as_array() else {
+    let ClaudeContent::Blocks(blocks) = content else {
         return false;
     };
 
     blocks
         .iter()
-        .any(|block| block.get("type").and_then(Value::as_str) == Some(CONTENT_TOOL_RESULT))
+        .any(|block| matches!(block, ClaudeContentBlock::ToolResult { .. }))
 }
 
 pub fn has_non_tool_result_content(message: &ClaudeMessage) -> bool {
@@ -44,21 +46,26 @@ pub fn has_non_tool_result_content(message: &ClaudeMessage) -> bool {
         return false;
     };
 
-    if content.is_string() {
-        return true;
+    match content {
+        ClaudeContent::Text(_) => true,
+        ClaudeContent::Blocks(blocks) => blocks
+            .iter()
+            .any(|block| !matches!(block, ClaudeContentBlock::ToolResult { .. })),
+        ClaudeContent::Other(_) => false,
     }
-
-    let Some(blocks) = content.as_array() else {
-        return false;
-    };
-
-    blocks
-        .iter()
-        .any(|block| block.get("type").and_then(Value::as_str) != Some(CONTENT_TOOL_RESULT))
 }
 
-fn convert_tool_result_block(block: &Value) -> Option<Value> {
-    let Some(raw_tool_use_id) = block.get("tool_use_id").and_then(Value::as_str) else {
+fn convert_tool_result_block(block: &ClaudeContentBlock) -> Option<OpenAiToolMessage> {
+    let ClaudeContentBlock::ToolResult {
+        tool_use_id,
+        content,
+        ..
+    } = block
+    else {
+        return None;
+    };
+
+    let Some(raw_tool_use_id) = tool_use_id.as_deref() else {
         warn!(
             phase = "drop_tool_result",
             reason = "missing_tool_use_id",
@@ -77,12 +84,11 @@ fn convert_tool_result_block(block: &Value) -> Option<Value> {
         return None;
     }
 
-    let normalized_content = parse_tool_result_content(block.get("content"));
-    Some(json!({
-        "role": ROLE_TOOL,
-        "tool_call_id": tool_use_id,
-        "content": normalized_content,
-    }))
+    let normalized_content = parse_tool_result_content(content.as_ref());
+    Some(OpenAiToolMessage::new(
+        tool_use_id.to_string(),
+        normalized_content,
+    ))
 }
 
 fn parse_tool_result_content(content: Option<&Value>) -> String {
@@ -94,7 +100,7 @@ fn parse_tool_result_content(content: Option<&Value>) -> String {
         Value::Null => "No content provided".to_string(),
         Value::String(text) => text.to_string(),
         Value::Array(items) => normalize_array_tool_content(items),
-        Value::Object(object) => normalize_object_tool_content(content, object),
+        Value::Object(_) => normalize_object_tool_content(content),
         other => other.to_string(),
     }
 }
@@ -112,30 +118,36 @@ fn normalize_array_tool_content(items: &[Value]) -> String {
 }
 
 fn extract_item_text(item: &Value) -> Option<String> {
-    if let Some(text) = item.as_str() {
-        return Some(text.to_string());
+    match serde_json::from_value::<LooseTextBlock>(item.clone()) {
+        Ok(block) if block.block_type.as_deref() == Some(CONTENT_TEXT) => block.text_as_owned(),
+        Ok(block) => block.text_as_owned(),
+        Err(_) => item.as_str().map(ToOwned::to_owned),
     }
-    if item.get("type").and_then(Value::as_str) == Some(CONTENT_TEXT) {
-        return item
-            .get("text")
-            .and_then(Value::as_str)
-            .map(ToOwned::to_owned);
-    }
-    item.get("text")
-        .and_then(Value::as_str)
-        .map(ToOwned::to_owned)
 }
 
-fn normalize_object_tool_content(
-    content: &Value,
-    object: &serde_json::Map<String, Value>,
-) -> String {
-    if object.get("type").and_then(Value::as_str) == Some(CONTENT_TEXT) {
-        return object
-            .get("text")
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_string();
+fn normalize_object_tool_content(content: &Value) -> String {
+    let parsed = serde_json::from_value::<LooseTextBlock>(content.clone());
+    if let Ok(block) = parsed {
+        if block.block_type.as_deref() == Some(CONTENT_TEXT) {
+            return block.text_as_owned().unwrap_or_default();
+        }
     }
+
     content.to_string()
+}
+
+#[derive(Debug, Deserialize)]
+struct LooseTextBlock {
+    #[serde(rename = "type")]
+    block_type: Option<String>,
+    text: Option<Value>,
+}
+
+impl LooseTextBlock {
+    fn text_as_owned(&self) -> Option<String> {
+        self.text
+            .as_ref()
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned)
+    }
 }

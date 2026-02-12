@@ -1,5 +1,6 @@
 use salvo::http::StatusCode;
-use serde_json::Value;
+use serde::de::{Deserializer, IgnoredAny};
+use serde::Deserialize;
 
 #[derive(Debug)]
 pub struct UpstreamError {
@@ -41,16 +42,12 @@ pub fn classify_openai_error(detail: &str) -> String {
 }
 
 pub fn extract_error_message_from_body(body: &str) -> String {
-    if let Ok(parsed) = serde_json::from_str::<Value>(body) {
-        if let Some(message) = parsed
-            .get("error")
-            .and_then(|error| error.get("message"))
-            .and_then(Value::as_str)
-        {
-            return message.to_string();
+    if let Ok(parsed) = serde_json::from_str::<UpstreamErrorEnvelope>(body) {
+        if let Some(message) = parsed.error.and_then(UpstreamErrorField::into_message) {
+            return message;
         }
-        if let Some(message) = parsed.get("message").and_then(Value::as_str) {
-            return message.to_string();
+        if let Some(message) = parsed.message {
+            return message;
         }
     }
 
@@ -58,5 +55,101 @@ pub fn extract_error_message_from_body(body: &str) -> String {
         "upstream API returned an empty error response".to_string()
     } else {
         body.to_string()
+    }
+}
+
+fn deserialize_optional_string<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = Option::<LooseString>::deserialize(deserializer)?;
+    Ok(value.and_then(LooseString::into_string))
+}
+
+#[derive(Debug, Deserialize)]
+struct UpstreamErrorEnvelope {
+    #[serde(default)]
+    error: Option<UpstreamErrorField>,
+    #[serde(default, deserialize_with = "deserialize_optional_string")]
+    message: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum UpstreamErrorField {
+    Payload(UpstreamErrorPayload),
+    Other(IgnoredAny),
+}
+
+impl UpstreamErrorField {
+    fn into_message(self) -> Option<String> {
+        match self {
+            UpstreamErrorField::Payload(payload) => payload.message,
+            UpstreamErrorField::Other(_) => None,
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct UpstreamErrorPayload {
+    #[serde(default, deserialize_with = "deserialize_optional_string")]
+    message: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum LooseString {
+    String(String),
+    Other(IgnoredAny),
+}
+
+impl LooseString {
+    fn into_string(self) -> Option<String> {
+        match self {
+            LooseString::String(value) => Some(value),
+            LooseString::Other(_) => None,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::extract_error_message_from_body;
+
+    #[test]
+    fn extracts_nested_error_message() {
+        let body = r#"{"error":{"message":"nested"}}"#;
+        assert_eq!(extract_error_message_from_body(body), "nested");
+    }
+
+    #[test]
+    fn extracts_top_level_message() {
+        let body = r#"{"message":"top"}"#;
+        assert_eq!(extract_error_message_from_body(body), "top");
+    }
+
+    #[test]
+    fn prefers_nested_error_message() {
+        let body = r#"{"error":{"message":"nested"},"message":"top"}"#;
+        assert_eq!(extract_error_message_from_body(body), "nested");
+    }
+
+    #[test]
+    fn ignores_non_string_message_fields() {
+        let body = r#"{"error":{"message":"nested"},"message":123}"#;
+        assert_eq!(extract_error_message_from_body(body), "nested");
+    }
+
+    #[test]
+    fn returns_default_message_for_empty_body() {
+        assert_eq!(
+            extract_error_message_from_body("   "),
+            "upstream API returned an empty error response"
+        );
+    }
+
+    #[test]
+    fn returns_original_body_for_non_json() {
+        assert_eq!(extract_error_message_from_body("gateway failed"), "gateway failed");
     }
 }

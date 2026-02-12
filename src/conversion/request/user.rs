@@ -1,80 +1,66 @@
-use serde_json::{Value, json};
+use crate::conversion::request::models::{
+    OpenAiImageUrl, OpenAiMessage, OpenAiUserContentPart, OpenAiUserMessage,
+};
+use crate::models::{ClaudeContent, ClaudeContentBlock, ClaudeImageSource, ClaudeMessage};
 
-use crate::constants::{CONTENT_IMAGE, CONTENT_TEXT, CONTENT_TOOL_RESULT, ROLE_USER};
-use crate::models::ClaudeMessage;
-
-pub fn convert_claude_user_message(message: &ClaudeMessage) -> Value {
+pub fn convert_claude_user_message(message: &ClaudeMessage) -> OpenAiMessage {
     let Some(content) = &message.content else {
-        return json!({ "role": ROLE_USER, "content": "" });
+        return OpenAiMessage::User(OpenAiUserMessage::from_text(String::new()));
     };
 
-    if let Some(text_content) = content.as_str() {
-        return json!({ "role": ROLE_USER, "content": text_content });
-    }
+    match content {
+        ClaudeContent::Text(text_content) => {
+            OpenAiMessage::User(OpenAiUserMessage::from_text(text_content.to_string()))
+        }
+        ClaudeContent::Blocks(blocks) => {
+            let openai_content: Vec<OpenAiUserContentPart> =
+                blocks.iter().filter_map(convert_user_block).collect();
 
-    let Some(blocks) = content.as_array() else {
-        return json!({ "role": ROLE_USER, "content": "" });
-    };
-
-    let openai_content: Vec<Value> = blocks.iter().filter_map(convert_user_block).collect();
-
-    if let Some(text) = single_text_content(&openai_content) {
-        json!({ "role": ROLE_USER, "content": text })
-    } else {
-        json!({ "role": ROLE_USER, "content": openai_content })
+            if let Some(text) = single_text_content(&openai_content) {
+                OpenAiMessage::User(OpenAiUserMessage::from_text(text.to_string()))
+            } else {
+                OpenAiMessage::User(OpenAiUserMessage::from_parts(openai_content))
+            }
+        }
+        ClaudeContent::Other(_) => OpenAiMessage::User(OpenAiUserMessage::from_text(String::new())),
     }
 }
 
-fn convert_user_block(block: &Value) -> Option<Value> {
-    let block_type = block.get("type").and_then(Value::as_str)?;
-    if block_type == CONTENT_TEXT {
-        return block
-            .get("text")
-            .and_then(Value::as_str)
-            .map(|text| json!({ "type": "text", "text": text }));
+fn convert_user_block(block: &ClaudeContentBlock) -> Option<OpenAiUserContentPart> {
+    match block {
+        ClaudeContentBlock::Text { text, .. } => Some(OpenAiUserContentPart::Text {
+            text: text.to_string(),
+        }),
+        ClaudeContentBlock::ToolResult { .. } => None,
+        ClaudeContentBlock::Image { source, .. } => convert_image_source(source.as_ref()),
+        _ => None,
     }
-    if block_type == CONTENT_TOOL_RESULT {
-        return None;
-    }
-    if block_type != CONTENT_IMAGE {
-        return None;
-    }
+}
 
-    let source = block.get("source")?.as_object()?;
-    let source_type = source
-        .get("type")
-        .and_then(Value::as_str)
-        .unwrap_or_default();
-    let media_type = source
-        .get("media_type")
-        .and_then(Value::as_str)
-        .unwrap_or_default();
-    let data = source
-        .get("data")
-        .and_then(Value::as_str)
-        .unwrap_or_default();
+fn convert_image_source(source: Option<&ClaudeImageSource>) -> Option<OpenAiUserContentPart> {
+    let source = source?;
+    let source_type = source.source_type.as_deref().unwrap_or_default();
+    let media_type = source.media_type.as_deref().unwrap_or_default();
+    let data = source.data.as_deref().unwrap_or_default();
 
     if source_type != "base64" || media_type.is_empty() || data.is_empty() {
         return None;
     }
 
-    Some(json!({
-        "type": "image_url",
-        "image_url": {"url": format!("data:{media_type};base64,{data}")}
-    }))
+    Some(OpenAiUserContentPart::ImageUrl {
+        image_url: OpenAiImageUrl {
+            url: format!("data:{media_type};base64,{data}"),
+        },
+    })
 }
 
-fn single_text_content(openai_content: &[Value]) -> Option<&str> {
+fn single_text_content(openai_content: &[OpenAiUserContentPart]) -> Option<&str> {
     if openai_content.len() != 1 {
         return None;
     }
-    if openai_content
-        .first()
-        .and_then(|item| item.get("type"))
-        .and_then(Value::as_str)
-        != Some("text")
-    {
-        return None;
+
+    match openai_content.first() {
+        Some(OpenAiUserContentPart::Text { text }) => Some(text.as_str()),
+        _ => None,
     }
-    openai_content[0].get("text").and_then(Value::as_str)
 }

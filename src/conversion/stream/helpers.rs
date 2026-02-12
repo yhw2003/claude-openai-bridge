@@ -1,99 +1,80 @@
-use serde_json::Value;
+use serde::de::IgnoredAny;
+use serde::Deserialize;
 
-use crate::constants::TOOL_FUNCTION;
 use crate::conversion::response::map_finish_reason;
-use crate::conversion::stream::state::StreamState;
+use crate::conversion::stream::state::{StreamState, StreamUsage};
 
-pub fn first_choice(parsed_chunk: &Value) -> Option<&Value> {
-    parsed_chunk
-        .get("choices")
-        .and_then(Value::as_array)
-        .and_then(|choices| choices.first())
+pub fn first_choice(parsed_chunk: &OpenAiStreamChunk) -> Option<&StreamChoice> {
+    parsed_chunk.choices.first()
 }
 
-pub fn update_usage(parsed_chunk: &Value, state: &mut StreamState) {
-    let Some(usage) = parsed_chunk.get("usage").and_then(Value::as_object) else {
+pub fn parse_stream_chunk(data_line: &str) -> Result<OpenAiStreamChunk, serde_json::Error> {
+    serde_json::from_str(data_line)
+}
+
+pub fn update_usage(parsed_chunk: &OpenAiStreamChunk, state: &mut StreamState) {
+    let Some(usage) = parsed_chunk.usage.as_ref() else {
         return;
     };
 
-    let input_tokens = usage
-        .get("prompt_tokens")
-        .and_then(Value::as_u64)
-        .unwrap_or(0);
-    let output_tokens = usage
-        .get("completion_tokens")
-        .and_then(Value::as_u64)
-        .unwrap_or(0);
+    let input_tokens = usage.prompt_tokens.unwrap_or(0);
+    let output_tokens = usage.completion_tokens.unwrap_or(0);
     let cached_tokens = usage
-        .get("prompt_tokens_details")
-        .and_then(Value::as_object)
-        .and_then(|details| details.get("cached_tokens"))
-        .and_then(Value::as_u64)
+        .prompt_tokens_details
+        .as_ref()
+        .and_then(|details| details.cached_tokens)
         .unwrap_or(0);
 
-    state.usage_data = if cached_tokens > 0 {
-        serde_json::json!({
-            "input_tokens": input_tokens,
-            "output_tokens": output_tokens,
-            "cache_read_input_tokens": cached_tokens,
-        })
-    } else {
-        serde_json::json!({"input_tokens": input_tokens, "output_tokens": output_tokens})
+    state.usage_data = StreamUsage {
+        input_tokens,
+        output_tokens,
+        cache_read_input_tokens: (cached_tokens > 0).then_some(cached_tokens),
     };
 }
 
-pub fn update_finish_reason(choice: &Value, state: &mut StreamState) {
-    let Some(finish_reason) = choice.get("finish_reason").and_then(Value::as_str) else {
+pub fn update_finish_reason(choice: &StreamChoice, state: &mut StreamState) {
+    let Some(finish_reason) = choice.finish_reason.as_deref() else {
         return;
     };
     state.final_stop_reason = map_finish_reason(finish_reason).to_string();
 }
 
-pub fn tool_call_index(tool_call_delta: &Value) -> usize {
-    tool_call_delta
-        .get("index")
-        .and_then(Value::as_u64)
-        .unwrap_or(0) as usize
+pub fn tool_call_index(tool_call_delta: &ToolCallDelta) -> usize {
+    tool_call_delta.index.unwrap_or(0) as usize
 }
 
 pub fn update_tool_identity(
-    tool_call_delta: &Value,
+    tool_call_delta: &ToolCallDelta,
     state: &mut StreamState,
     tool_call_index: usize,
 ) {
     let tool_call_state = state.tool_calls.entry(tool_call_index).or_default();
 
-    if let Some(id) = tool_call_delta.get("id").and_then(Value::as_str) {
+    if let Some(id) = tool_call_delta.id.as_deref() {
         tool_call_state.id = Some(id.to_string());
     }
     if let Some(name) = tool_call_delta
-        .get(TOOL_FUNCTION)
-        .and_then(|function| function.get("name"))
-        .and_then(Value::as_str)
+        .function
+        .as_ref()
+        .and_then(|function| function.name.as_deref())
     {
         tool_call_state.name = Some(name.to_string());
     }
 }
 
-pub fn tool_arguments_delta(tool_call_delta: &Value) -> Option<&str> {
+pub fn tool_arguments_delta(tool_call_delta: &ToolCallDelta) -> Option<&str> {
     tool_call_delta
-        .get(TOOL_FUNCTION)
-        .and_then(|function| function.get("arguments"))
-        .and_then(Value::as_str)
+        .function
+        .as_ref()
+        .and_then(|function| function.arguments.as_deref())
 }
 
-pub fn content_delta(choice: &Value) -> Option<&str> {
-    choice
-        .get("delta")
-        .and_then(|delta| delta.get("content"))
-        .and_then(Value::as_str)
+pub fn content_delta(choice: &StreamChoice) -> Option<&str> {
+    choice.delta.as_ref().and_then(|delta| delta.content.as_deref())
 }
 
-pub fn tool_call_deltas(choice: &Value) -> Option<&Vec<Value>> {
-    choice
-        .get("delta")
-        .and_then(|delta| delta.get("tool_calls"))
-        .and_then(Value::as_array)
+pub fn tool_call_deltas(choice: &StreamChoice) -> Option<&Vec<ToolCallDelta>> {
+    choice.delta.as_ref().and_then(|delta| delta.tool_calls.as_ref())
 }
 
 pub fn tool_started(state: &StreamState, tool_call_index: usize) -> bool {
@@ -115,7 +96,7 @@ pub fn snapshot_json_state(
         .expect("tool call state should exist");
 
     tool_call_state.args_buffer.push_str(arguments_delta);
-    let has_complete_json = serde_json::from_str::<Value>(&tool_call_state.args_buffer).is_ok();
+    let has_complete_json = serde_json::from_str::<IgnoredAny>(&tool_call_state.args_buffer).is_ok();
 
     (
         tool_call_state.json_sent,
@@ -123,4 +104,49 @@ pub fn snapshot_json_state(
         tool_call_state.claude_index,
         tool_call_state.args_buffer.clone(),
     )
+}
+
+#[derive(Debug, Deserialize)]
+pub struct OpenAiStreamChunk {
+    #[serde(default)]
+    pub choices: Vec<StreamChoice>,
+    pub usage: Option<OpenAiUsage>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct StreamChoice {
+    pub finish_reason: Option<String>,
+    pub delta: Option<StreamDelta>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct StreamDelta {
+    pub content: Option<String>,
+    pub tool_calls: Option<Vec<ToolCallDelta>>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ToolCallDelta {
+    pub index: Option<u64>,
+    pub id: Option<String>,
+    #[serde(rename = "function")]
+    pub function: Option<ToolFunctionDelta>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ToolFunctionDelta {
+    pub name: Option<String>,
+    pub arguments: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct OpenAiUsage {
+    pub prompt_tokens: Option<u64>,
+    pub completion_tokens: Option<u64>,
+    pub prompt_tokens_details: Option<PromptTokensDetails>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct PromptTokensDetails {
+    pub cached_tokens: Option<u64>,
 }

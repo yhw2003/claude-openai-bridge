@@ -1,34 +1,29 @@
-use serde_json::{Value, json};
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use tracing::warn;
 use uuid::Uuid;
 
 use crate::constants::{
-    CONTENT_TEXT, CONTENT_TOOL_USE, ROLE_ASSISTANT, STOP_END_TURN, STOP_MAX_TOKENS, STOP_TOOL_USE,
-    TOOL_FUNCTION,
+    ROLE_ASSISTANT, STOP_END_TURN, STOP_MAX_TOKENS, STOP_TOOL_USE, TOOL_FUNCTION,
 };
 use crate::models::ClaudeMessagesRequest;
 
-pub fn convert_openai_to_claude_response(
-    openai_response: &Value,
+pub(crate) fn convert_openai_to_claude_response(
+    openai_response: &OpenAiChatResponse,
     original_request: &ClaudeMessagesRequest,
-) -> Result<Value, String> {
+) -> Result<ClaudeResponse, String> {
     let choice = first_choice(openai_response)?;
     let message = choice
-        .get("message")
-        .and_then(Value::as_object)
+        .message
+        .as_ref()
         .ok_or_else(|| "missing message in upstream choice".to_string())?;
 
     let mut content_blocks = Vec::new();
-    push_text_content(message.get("content"), &mut content_blocks);
-    push_tool_use_content(message.get("tool_calls"), &mut content_blocks);
+    push_text_content(message.content.as_ref(), &mut content_blocks);
+    push_tool_use_content(&message.tool_calls, &mut content_blocks);
 
     ensure_non_empty_content(&mut content_blocks);
-    let stop_reason = map_finish_reason(
-        choice
-            .get("finish_reason")
-            .and_then(Value::as_str)
-            .unwrap_or("stop"),
-    );
+    let stop_reason = map_finish_reason(choice.finish_reason.as_deref().unwrap_or("stop"));
 
     Ok(build_claude_response(
         openai_response,
@@ -38,35 +33,41 @@ pub fn convert_openai_to_claude_response(
     ))
 }
 
-fn first_choice(openai_response: &Value) -> Result<&Value, String> {
-    let choices = openai_response
-        .get("choices")
-        .and_then(Value::as_array)
-        .ok_or_else(|| "no choices in upstream response".to_string())?;
-
-    choices
+fn first_choice(openai_response: &OpenAiChatResponse) -> Result<&OpenAiChoice, String> {
+    openai_response
+        .choices
         .first()
         .ok_or_else(|| "no first choice in upstream response".to_string())
 }
 
-fn push_text_content(content: Option<&Value>, content_blocks: &mut Vec<Value>) {
+fn push_text_content(
+    content: Option<&OpenAiResponseContent>,
+    content_blocks: &mut Vec<ClaudeContentBlock>,
+) {
     let Some(content_value) = content else {
         return;
     };
-    if let Some(content_text) = content_value.as_str() {
-        content_blocks.push(json!({"type": CONTENT_TEXT, "text": content_text}));
-        return;
-    }
-    if !content_value.is_null() {
-        content_blocks.push(json!({"type": CONTENT_TEXT, "text": content_value.to_string()}));
+
+    match content_value {
+        OpenAiResponseContent::Text(content_text) => {
+            content_blocks.push(ClaudeContentBlock::Text {
+                text: content_text.to_string(),
+            });
+        }
+        OpenAiResponseContent::Other(content_json) => {
+            if !content_json.is_null() {
+                content_blocks.push(ClaudeContentBlock::Text {
+                    text: content_json.to_string(),
+                });
+            }
+        }
     }
 }
 
-fn push_tool_use_content(tool_calls: Option<&Value>, content_blocks: &mut Vec<Value>) {
-    let Some(tool_calls) = tool_calls.and_then(Value::as_array) else {
-        return;
-    };
-
+fn push_tool_use_content(
+    tool_calls: &[OpenAiResponseToolCall],
+    content_blocks: &mut Vec<ClaudeContentBlock>,
+) {
     for tool_call in tool_calls {
         let Some(block) = map_tool_call(tool_call) else {
             continue;
@@ -75,21 +76,23 @@ fn push_tool_use_content(tool_calls: Option<&Value>, content_blocks: &mut Vec<Va
     }
 }
 
-fn map_tool_call(tool_call: &Value) -> Option<Value> {
-    if tool_call.get("type").and_then(Value::as_str) != Some(TOOL_FUNCTION) {
+fn map_tool_call(tool_call: &OpenAiResponseToolCall) -> Option<ClaudeContentBlock> {
+    if tool_call.kind.as_deref() != Some(TOOL_FUNCTION) {
         return None;
     }
 
-    let function_data = tool_call.get(TOOL_FUNCTION)?.as_object()?;
-    let arguments_raw = function_data
-        .get("arguments")
-        .and_then(Value::as_str)
-        .unwrap_or("{}");
+    let function_data = tool_call.function.as_ref()?;
+    let arguments_raw = function_data.arguments.as_deref().unwrap_or("{}");
 
-    let arguments_value = serde_json::from_str::<Value>(arguments_raw)
-        .unwrap_or_else(|_| json!({ "raw_arguments": arguments_raw }));
+    let arguments_value = serde_json::from_str::<Value>(arguments_raw).unwrap_or_else(|_| {
+        serde_json::Value::Object(
+            [("raw_arguments".to_string(), Value::String(arguments_raw.to_string()))]
+                .into_iter()
+                .collect(),
+        )
+    });
 
-    let Some(raw_tool_call_id) = tool_call.get("id").and_then(Value::as_str) else {
+    let Some(raw_tool_call_id) = tool_call.id.as_deref() else {
         warn!(
             phase = "drop_tool_use",
             reason = "missing_tool_call_id",
@@ -108,52 +111,45 @@ fn map_tool_call(tool_call: &Value) -> Option<Value> {
         return None;
     }
 
-    Some(json!({
-        "type": CONTENT_TOOL_USE,
-        "id": tool_call_id,
-        "name": function_data
-            .get("name")
-            .and_then(Value::as_str)
-            .unwrap_or_default(),
-        "input": arguments_value,
-    }))
+    Some(ClaudeContentBlock::ToolUse {
+        id: tool_call_id.to_string(),
+        name: function_data.name.clone().unwrap_or_default(),
+        input: arguments_value,
+    })
 }
 
-fn ensure_non_empty_content(content_blocks: &mut Vec<Value>) {
+fn ensure_non_empty_content(content_blocks: &mut Vec<ClaudeContentBlock>) {
     if content_blocks.is_empty() {
-        content_blocks.push(json!({"type": CONTENT_TEXT, "text": ""}));
+        content_blocks.push(ClaudeContentBlock::Text {
+            text: String::new(),
+        });
     }
 }
 
 fn build_claude_response(
-    openai_response: &Value,
+    openai_response: &OpenAiChatResponse,
     original_request: &ClaudeMessagesRequest,
-    content_blocks: Vec<Value>,
+    content_blocks: Vec<ClaudeContentBlock>,
     stop_reason: &str,
-) -> Value {
-    let usage = openai_response
-        .get("usage")
-        .and_then(Value::as_object)
-        .cloned()
-        .unwrap_or_default();
+) -> ClaudeResponse {
+    let usage = openai_response.usage.as_ref();
 
-    json!({
-        "id": openai_response
-            .get("id")
-            .and_then(Value::as_str)
-            .map(ToOwned::to_owned)
+    ClaudeResponse {
+        id: openai_response
+            .id
+            .clone()
             .unwrap_or_else(|| format!("msg_{}", Uuid::new_v4())),
-        "type": "message",
-        "role": ROLE_ASSISTANT,
-        "model": original_request.model,
-        "content": content_blocks,
-        "stop_reason": stop_reason,
-        "stop_sequence": Value::Null,
-        "usage": {
-            "input_tokens": usage.get("prompt_tokens").and_then(Value::as_u64).unwrap_or(0),
-            "output_tokens": usage.get("completion_tokens").and_then(Value::as_u64).unwrap_or(0),
-        }
-    })
+        response_type: "message".to_string(),
+        role: ROLE_ASSISTANT.to_string(),
+        model: original_request.model.clone(),
+        content: content_blocks,
+        stop_reason: stop_reason.to_string(),
+        stop_sequence: None,
+        usage: ClaudeUsage {
+            input_tokens: usage.and_then(|value| value.prompt_tokens).unwrap_or(0),
+            output_tokens: usage.and_then(|value| value.completion_tokens).unwrap_or(0),
+        },
+    }
 }
 
 pub fn map_finish_reason(finish_reason: &str) -> &str {
@@ -162,6 +158,88 @@ pub fn map_finish_reason(finish_reason: &str) -> &str {
         "tool_calls" | "function_call" => STOP_TOOL_USE,
         _ => STOP_END_TURN,
     }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct OpenAiChatResponse {
+    id: Option<String>,
+    #[serde(default)]
+    choices: Vec<OpenAiChoice>,
+    usage: Option<OpenAiUsage>,
+}
+
+impl OpenAiChatResponse {
+    pub(crate) fn id(&self) -> Option<&str> {
+        self.id.as_deref()
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct OpenAiChoice {
+    finish_reason: Option<String>,
+    message: Option<OpenAiResponseMessage>,
+}
+
+#[derive(Debug, Deserialize)]
+struct OpenAiResponseMessage {
+    content: Option<OpenAiResponseContent>,
+    #[serde(default)]
+    tool_calls: Vec<OpenAiResponseToolCall>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum OpenAiResponseContent {
+    Text(String),
+    Other(Value),
+}
+
+#[derive(Debug, Deserialize)]
+struct OpenAiResponseToolCall {
+    id: Option<String>,
+    #[serde(rename = "type")]
+    kind: Option<String>,
+    function: Option<OpenAiFunctionPayload>,
+}
+
+#[derive(Debug, Deserialize)]
+struct OpenAiFunctionPayload {
+    name: Option<String>,
+    arguments: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct OpenAiUsage {
+    prompt_tokens: Option<u64>,
+    completion_tokens: Option<u64>,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct ClaudeResponse {
+    id: String,
+    #[serde(rename = "type")]
+    response_type: String,
+    role: String,
+    model: String,
+    content: Vec<ClaudeContentBlock>,
+    stop_reason: String,
+    stop_sequence: Option<String>,
+    usage: ClaudeUsage,
+}
+
+#[derive(Debug, Serialize)]
+struct ClaudeUsage {
+    input_tokens: u64,
+    output_tokens: u64,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(tag = "type")]
+enum ClaudeContentBlock {
+    #[serde(rename = "text")]
+    Text { text: String },
+    #[serde(rename = "tool_use")]
+    ToolUse { id: String, name: String, input: Value },
 }
 
 #[cfg(test)]
@@ -204,16 +282,16 @@ mod tests {
             "usage": {"prompt_tokens": 1, "completion_tokens": 1}
         });
 
-        let converted = convert_openai_to_claude_response(&openai_response, &empty_request())
+        let parsed: OpenAiChatResponse =
+            serde_json::from_value(openai_response).expect("response should deserialize");
+        let converted = convert_openai_to_claude_response(&parsed, &empty_request())
             .expect("conversion should succeed");
-        let content = converted
-            .get("content")
-            .and_then(Value::as_array)
-            .expect("content should be array");
 
-        assert_eq!(content.len(), 1);
-        assert_eq!(content[0].get("type").and_then(Value::as_str), Some("text"));
-        assert_eq!(content[0].get("text").and_then(Value::as_str), Some(""));
+        assert_eq!(converted.content.len(), 1);
+        assert!(matches!(
+            &converted.content[0],
+            ClaudeContentBlock::Text { text } if text.is_empty()
+        ));
     }
 
     #[test]
@@ -237,28 +315,21 @@ mod tests {
             "usage": {"prompt_tokens": 1, "completion_tokens": 1}
         });
 
-        let converted = convert_openai_to_claude_response(&openai_response, &empty_request())
+        let parsed: OpenAiChatResponse =
+            serde_json::from_value(openai_response).expect("response should deserialize");
+        let converted = convert_openai_to_claude_response(&parsed, &empty_request())
             .expect("conversion should succeed");
-        let content = converted
-            .get("content")
-            .and_then(Value::as_array)
-            .expect("content should be array");
 
-        assert_eq!(content.len(), 1);
+        assert_eq!(converted.content.len(), 1);
+        let tool_use = match &converted.content[0] {
+            ClaudeContentBlock::ToolUse { id, name, input } => (id, name, input),
+            _ => panic!("expected tool_use content block"),
+        };
+
+        assert_eq!(tool_use.0, "call_abc123");
+        assert_eq!(tool_use.1, "Bash");
         assert_eq!(
-            content[0].get("type").and_then(Value::as_str),
-            Some("tool_use")
-        );
-        assert_eq!(
-            content[0].get("id").and_then(Value::as_str),
-            Some("call_abc123")
-        );
-        assert_eq!(content[0].get("name").and_then(Value::as_str), Some("Bash"));
-        assert_eq!(
-            content[0]
-                .get("input")
-                .and_then(|v| v.get("command"))
-                .and_then(Value::as_str),
+            tool_use.2.get("command").and_then(Value::as_str),
             Some("cargo fmt")
         );
     }

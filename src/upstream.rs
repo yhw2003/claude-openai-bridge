@@ -2,11 +2,12 @@ use reqwest::Client;
 use reqwest::header::{
     AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderName, HeaderValue, USER_AGENT,
 };
-use serde_json::Value;
+use serde::Serialize;
 use std::time::Duration;
 use tracing::{error, warn};
 
 use crate::config::Config;
+use crate::conversion::response::OpenAiChatResponse;
 use crate::errors::{UpstreamError, classify_openai_error, extract_error_message_from_body};
 use crate::utils::to_salvo_status;
 
@@ -24,7 +25,10 @@ impl UpstreamClient {
         Ok(Self { client, config })
     }
 
-    pub async fn chat_completion(&self, body: &Value) -> Result<Value, UpstreamError> {
+    pub async fn chat_completion<T: Serialize + ?Sized>(
+        &self,
+        body: &T,
+    ) -> Result<OpenAiChatResponse, UpstreamError> {
         let response = self
             .send_chat_request(
                 body,
@@ -33,7 +37,7 @@ impl UpstreamClient {
             )
             .await?;
         response
-            .json::<Value>()
+            .json::<OpenAiChatResponse>()
             .await
             .map_err(|error| UpstreamError {
                 status: salvo::http::StatusCode::BAD_GATEWAY,
@@ -43,17 +47,17 @@ impl UpstreamClient {
             })
     }
 
-    pub async fn chat_completion_stream(
+    pub async fn chat_completion_stream<T: Serialize + ?Sized>(
         &self,
-        body: &Value,
+        body: &T,
     ) -> Result<reqwest::Response, UpstreamError> {
         let stream_timeout = self.config.stream_request_timeout.map(Duration::from_secs);
         self.send_chat_request(body, stream_timeout, "stream").await
     }
 
-    async fn send_chat_request(
+    async fn send_chat_request<T: Serialize + ?Sized>(
         &self,
-        body: &Value,
+        body: &T,
         timeout: Option<Duration>,
         request_kind: &'static str,
     ) -> Result<reqwest::Response, UpstreamError> {

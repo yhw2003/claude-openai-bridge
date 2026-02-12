@@ -1,12 +1,12 @@
 use futures_util::StreamExt;
 use salvo::http::body::BodySender;
-use serde_json::Value;
 use tracing::{error, warn};
 use uuid::Uuid;
 
 use crate::conversion::stream::helpers::{
-    content_delta, first_choice, snapshot_json_state, tool_arguments_delta, tool_call_deltas,
-    tool_call_index, tool_started, update_finish_reason, update_tool_identity, update_usage,
+    StreamChoice, ToolCallDelta, content_delta, first_choice, parse_stream_chunk, snapshot_json_state,
+    tool_arguments_delta, tool_call_deltas, tool_call_index, tool_started, update_finish_reason,
+    update_tool_identity, update_usage,
 };
 use crate::conversion::stream::sse::{
     send_error_sse, send_start_sequence, send_stop_sequence, send_text_delta,
@@ -101,7 +101,7 @@ async fn process_complete_lines(
             break;
         }
 
-        let Ok(parsed_chunk) = serde_json::from_str::<Value>(data_line) else {
+        let Ok(parsed_chunk) = parse_stream_chunk(data_line) else {
             warn!("failed to parse upstream stream line as JSON: {data_line}");
             continue;
         };
@@ -122,7 +122,7 @@ async fn process_complete_lines(
 }
 
 async fn handle_content_delta(
-    choice: &Value,
+    choice: &StreamChoice,
     sender: &mut BodySender,
     state: &StreamState,
 ) -> std::io::Result<()> {
@@ -134,7 +134,7 @@ async fn handle_content_delta(
 }
 
 async fn process_tool_deltas(
-    choice: &Value,
+    choice: &StreamChoice,
     sender: &mut BodySender,
     state: &mut StreamState,
 ) -> std::io::Result<()> {
@@ -149,7 +149,7 @@ async fn process_tool_deltas(
 }
 
 async fn process_single_tool_delta(
-    tool_call_delta: &Value,
+    tool_call_delta: &ToolCallDelta,
     sender: &mut BodySender,
     state: &mut StreamState,
 ) -> std::io::Result<()> {
@@ -194,7 +194,7 @@ async fn maybe_start_tool_block(
 }
 
 async fn send_tool_json_if_ready(
-    tool_call_delta: &Value,
+    tool_call_delta: &ToolCallDelta,
     sender: &mut BodySender,
     state: &mut StreamState,
     tool_call_index: usize,

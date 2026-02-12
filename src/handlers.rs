@@ -1,10 +1,13 @@
 use salvo::http::StatusCode;
 use salvo::prelude::*;
-use serde_json::{Value, json};
+use serde::de::{Deserializer, IgnoredAny};
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use tracing::{debug, error, trace};
 
-use crate::constants::ROLE_USER;
-use crate::conversion::request::convert_claude_to_openai;
+use crate::conversion::request::{
+    OpenAiChatRequest, OpenAiMessage, OpenAiUserMessage, convert_claude_to_openai,
+};
 use crate::conversion::response::convert_openai_to_claude_response;
 use crate::conversion::stream::stream_openai_to_claude_sse;
 use crate::models::{ClaudeMessagesRequest, ClaudeTokenCountRequest};
@@ -113,81 +116,91 @@ pub async fn count_tokens(req: &mut Request, res: &mut Response) {
     );
 
     let estimated_tokens = estimate_input_tokens(&token_request);
-    res.render(Json(json!({"input_tokens": estimated_tokens})));
+    res.render(Json(TokenCountResponse {
+        input_tokens: estimated_tokens,
+    }));
 }
 
 #[handler]
 pub async fn health_check(res: &mut Response) {
     let config = &app_state().config;
-    res.render(Json(json!({
-        "status": "healthy",
-        "timestamp": now_timestamp_string(),
-        "openai_api_configured": !config.openai_api_key.is_empty(),
-        "api_key_valid": config.validate_openai_api_key_format(),
-        "client_api_key_validation": config.anthropic_api_key.is_some(),
-    })));
+    res.render(Json(HealthCheckResponse {
+        status: "healthy".to_string(),
+        timestamp: now_timestamp_string(),
+        openai_api_configured: !config.openai_api_key.is_empty(),
+        api_key_valid: config.validate_openai_api_key_format(),
+        client_api_key_validation: config.anthropic_api_key.is_some(),
+    }));
 }
 
 #[handler]
 pub async fn test_connection(res: &mut Response) {
     let state = app_state();
-    let test_request = json!({
-        "model": state.config.small_model,
-        "messages": [{"role": ROLE_USER, "content": "Hello"}],
-        "max_tokens": 5,
-        "stream": false,
-    });
+    let test_request = OpenAiChatRequest {
+        model: state.config.small_model.clone(),
+        messages: vec![OpenAiMessage::User(OpenAiUserMessage::from_text(
+            "Hello".to_string(),
+        ))],
+        max_tokens: 5,
+        temperature: 1.0,
+        stream: false,
+        stream_options: None,
+        stop: None,
+        top_p: None,
+        tools: None,
+        tool_choice: None,
+    };
 
     let upstream_response = match state.upstream.chat_completion(&test_request).await {
         Ok(value) => value,
         Err(error) => {
             error!("Connection test failed: {}", error.message);
             res.status_code(StatusCode::SERVICE_UNAVAILABLE);
-            res.render(Json(json!({
-                "status": "failed",
-                "error_type": "API Error",
-                "message": error.message,
-                "timestamp": now_timestamp_string(),
-                "suggestions": [
-                    "Check OPENAI_API_KEY",
-                    "Verify model permissions",
-                    "Check provider rate limits"
-                ]
-            })));
+            res.render(Json(ConnectionTestFailureResponse {
+                status: "failed".to_string(),
+                error_type: "API Error".to_string(),
+                message: error.message,
+                timestamp: now_timestamp_string(),
+                suggestions: vec![
+                    "Check OPENAI_API_KEY".to_string(),
+                    "Verify model permissions".to_string(),
+                    "Check provider rate limits".to_string(),
+                ],
+            }));
             return;
         }
     };
 
-    res.render(Json(json!({
-        "status": "success",
-        "message": "Successfully connected to upstream OpenAI-compatible API",
-        "model_used": state.config.small_model,
-        "timestamp": now_timestamp_string(),
-        "response_id": upstream_response.get("id").and_then(Value::as_str).unwrap_or("unknown"),
-    })));
+    res.render(Json(ConnectionTestSuccessResponse {
+        status: "success".to_string(),
+        message: "Successfully connected to upstream OpenAI-compatible API".to_string(),
+        model_used: state.config.small_model.clone(),
+        timestamp: now_timestamp_string(),
+        response_id: upstream_response.id().unwrap_or("unknown").to_string(),
+    }));
 }
 
 #[handler]
 pub async fn root(res: &mut Response) {
     let config = &app_state().config;
-    res.render(Json(json!({
-        "message": "Claude-to-OpenAI API Proxy (Rust/Salvo)",
-        "status": "running",
-        "config": {
-            "openai_base_url": config.openai_base_url,
-            "api_key_configured": !config.openai_api_key.is_empty(),
-            "client_api_key_validation": config.anthropic_api_key.is_some(),
-            "big_model": config.big_model,
-            "middle_model": config.middle_model,
-            "small_model": config.small_model,
+    res.render(Json(RootResponse {
+        message: "Claude-to-OpenAI API Proxy (Rust/Salvo)".to_string(),
+        status: "running".to_string(),
+        config: RootConfig {
+            openai_base_url: config.openai_base_url.clone(),
+            api_key_configured: !config.openai_api_key.is_empty(),
+            client_api_key_validation: config.anthropic_api_key.is_some(),
+            big_model: config.big_model.clone(),
+            middle_model: config.middle_model.clone(),
+            small_model: config.small_model.clone(),
         },
-        "endpoints": {
-            "messages": "/v1/messages",
-            "count_tokens": "/v1/messages/count_tokens",
-            "health": "/health",
-            "test_connection": "/test-connection"
-        }
-    })));
+        endpoints: RootEndpoints {
+            messages: "/v1/messages".to_string(),
+            count_tokens: "/v1/messages/count_tokens".to_string(),
+            health: "/health".to_string(),
+            test_connection: "/test-connection".to_string(),
+        },
+    }));
 }
 
 async fn parse_messages_request(
@@ -210,10 +223,9 @@ async fn parse_messages_request(
 async fn handle_streaming_request(
     res: &mut Response,
     request: ClaudeMessagesRequest,
-    openai_request: &mut Value,
+    openai_request: &mut OpenAiChatRequest,
 ) {
-    openai_request["stream"] = Value::Bool(true);
-    openai_request["stream_options"] = json!({ "include_usage": true });
+    openai_request.enable_stream_usage();
 
     let upstream_response = match app_state()
         .upstream
@@ -224,10 +236,13 @@ async fn handle_streaming_request(
         Err(error) => {
             error!("Streaming upstream error: {}", error.message);
             res.status_code(error.status);
-            res.render(Json(json!({
-                "type": "error",
-                "error": {"type": "api_error", "message": error.message}
-            })));
+            res.render(Json(StreamingErrorResponse {
+                response_type: "error".to_string(),
+                error: ErrorDetail {
+                    error_type: "api_error".to_string(),
+                    message: error.message,
+                },
+            }));
             return;
         }
     };
@@ -277,46 +292,206 @@ fn validate_client_api_key_header(req: &Request) -> Result<(), String> {
 fn estimate_input_tokens(token_request: &ClaudeTokenCountRequest) -> usize {
     let mut total_chars: usize = 0;
     if let Some(system) = &token_request.system {
-        total_chars += count_text_chars(system);
+        total_chars += count_system_text_chars(system);
     }
     for message in &token_request.messages {
         if let Some(content) = &message.content {
-            total_chars += count_text_chars(content);
+            total_chars += count_message_text_chars(content);
         }
     }
     std::cmp::max(1, total_chars / 4)
 }
 
-fn count_text_chars(value: &Value) -> usize {
+fn count_system_text_chars(system: &crate::models::ClaudeSystemContent) -> usize {
+    match system {
+        crate::models::ClaudeSystemContent::Text(text) => text.len(),
+        crate::models::ClaudeSystemContent::Blocks(blocks) => {
+            blocks.iter().map(count_system_block_text_chars).sum()
+        }
+        crate::models::ClaudeSystemContent::Other(value) => count_text_chars_in_value(value),
+    }
+}
+
+fn count_system_block_text_chars(block: &crate::models::ClaudeSystemBlock) -> usize {
+    match block {
+        crate::models::ClaudeSystemBlock::Text { text, .. } => text.len(),
+        crate::models::ClaudeSystemBlock::Unknown => 0,
+    }
+}
+
+fn count_message_text_chars(content: &crate::models::ClaudeContent) -> usize {
+    match content {
+        crate::models::ClaudeContent::Text(text) => text.len(),
+        crate::models::ClaudeContent::Blocks(blocks) => {
+            blocks.iter().map(count_message_block_text_chars).sum()
+        }
+        crate::models::ClaudeContent::Other(value) => count_text_chars_in_value(value),
+    }
+}
+
+fn count_message_block_text_chars(block: &crate::models::ClaudeContentBlock) -> usize {
+    match block {
+        crate::models::ClaudeContentBlock::Text { text, .. } => text.len(),
+        _ => serde_json::to_value(block)
+            .ok()
+            .as_ref()
+            .map(count_text_chars_in_value)
+            .unwrap_or(0),
+    }
+}
+
+fn count_text_chars_in_value(value: &Value) -> usize {
     match value {
         Value::Null => 0,
         Value::String(text) => text.len(),
-        Value::Array(items) => items.iter().map(count_text_chars).sum(),
-        Value::Object(object) => match object.get("text").and_then(Value::as_str) {
-            Some(text) => text.len(),
-            None => object.values().map(count_text_chars).sum(),
-        },
+        Value::Array(items) => items.iter().map(count_text_chars_in_value).sum(),
+        Value::Object(_) => serde_json::from_value::<LooseTextCarrier>(value.clone())
+            .ok()
+            .and_then(|payload| payload.text)
+            .map_or_else(|| count_text_chars_in_object_values(value), |text| text.len()),
         _ => 0,
     }
 }
 
+fn count_text_chars_in_object_values(value: &Value) -> usize {
+    let Value::Object(object) = value else {
+        return 0;
+    };
+    object.values().map(count_text_chars_in_value).sum()
+}
+
+fn deserialize_optional_string<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = Option::<LooseString>::deserialize(deserializer)?;
+    Ok(value.and_then(LooseString::into_string))
+}
+
 fn unauthorized(res: &mut Response, message: &str) {
     res.status_code(StatusCode::UNAUTHORIZED);
-    res.render(Json(json!({ "detail": message })));
+    res.render(Json(DetailResponse {
+        detail: message.to_string(),
+    }));
 }
 
 fn bad_request(res: &mut Response, message: &str) {
     res.status_code(StatusCode::BAD_REQUEST);
-    res.render(Json(json!({ "detail": message })));
+    res.render(Json(DetailResponse {
+        detail: message.to_string(),
+    }));
 }
 
 fn internal_error(res: &mut Response, message: &str) {
     res.status_code(StatusCode::INTERNAL_SERVER_ERROR);
-    res.render(Json(json!({ "detail": message })));
+    res.render(Json(DetailResponse {
+        detail: message.to_string(),
+    }));
 }
 
 fn upstream_failed(res: &mut Response, status: StatusCode, message: &str) {
     error!("Upstream error: {message}");
     res.status_code(status);
-    res.render(Json(json!({ "detail": message })));
+    res.render(Json(DetailResponse {
+        detail: message.to_string(),
+    }));
+}
+
+#[derive(Debug, Serialize)]
+struct DetailResponse {
+    detail: String,
+}
+
+#[derive(Debug, Serialize)]
+struct TokenCountResponse {
+    input_tokens: usize,
+}
+
+#[derive(Debug, Serialize)]
+struct HealthCheckResponse {
+    status: String,
+    timestamp: String,
+    openai_api_configured: bool,
+    api_key_valid: bool,
+    client_api_key_validation: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct ConnectionTestFailureResponse {
+    status: String,
+    error_type: String,
+    message: String,
+    timestamp: String,
+    suggestions: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct ConnectionTestSuccessResponse {
+    status: String,
+    message: String,
+    model_used: String,
+    timestamp: String,
+    response_id: String,
+}
+
+#[derive(Debug, Serialize)]
+struct StreamingErrorResponse {
+    #[serde(rename = "type")]
+    response_type: String,
+    error: ErrorDetail,
+}
+
+#[derive(Debug, Serialize)]
+struct ErrorDetail {
+    #[serde(rename = "type")]
+    error_type: String,
+    message: String,
+}
+
+#[derive(Debug, Serialize)]
+struct RootResponse {
+    message: String,
+    status: String,
+    config: RootConfig,
+    endpoints: RootEndpoints,
+}
+
+#[derive(Debug, Serialize)]
+struct RootConfig {
+    openai_base_url: String,
+    api_key_configured: bool,
+    client_api_key_validation: bool,
+    big_model: String,
+    middle_model: String,
+    small_model: String,
+}
+
+#[derive(Debug, Serialize)]
+struct RootEndpoints {
+    messages: String,
+    count_tokens: String,
+    health: String,
+    test_connection: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct LooseTextCarrier {
+    #[serde(default, deserialize_with = "deserialize_optional_string")]
+    text: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum LooseString {
+    String(String),
+    Other(IgnoredAny),
+}
+
+impl LooseString {
+    fn into_string(self) -> Option<String> {
+        match self {
+            Self::String(value) => Some(value),
+            Self::Other(_) => None,
+        }
+    }
 }
