@@ -1,4 +1,5 @@
 use serde_json::{Value, json};
+use tracing::warn;
 
 use crate::constants::{CONTENT_TEXT, CONTENT_TOOL_USE, ROLE_ASSISTANT, TOOL_FUNCTION};
 use crate::models::ClaudeMessage;
@@ -58,11 +59,45 @@ fn push_assistant_text(block: &Value, text_parts: &mut Vec<String>) {
 }
 
 fn push_assistant_tool_call(block: &Value, tool_calls: &mut Vec<Value>) {
-    let tool_id = block.get("id").and_then(Value::as_str).unwrap_or_default();
-    let tool_name = block
-        .get("name")
-        .and_then(Value::as_str)
-        .unwrap_or_default();
+    let Some(raw_tool_id) = block.get("id").and_then(Value::as_str) else {
+        warn!(
+            phase = "drop_tool_use",
+            reason = "missing_id",
+            "Dropping assistant tool_use block"
+        );
+        return;
+    };
+    let Some(raw_tool_name) = block.get("name").and_then(Value::as_str) else {
+        warn!(
+            phase = "drop_tool_use",
+            reason = "missing_name",
+            tool_id = raw_tool_id,
+            "Dropping assistant tool_use block"
+        );
+        return;
+    };
+
+    let tool_id = raw_tool_id.trim();
+    if tool_id.is_empty() {
+        warn!(
+            phase = "drop_tool_use",
+            reason = "empty_id",
+            "Dropping assistant tool_use block"
+        );
+        return;
+    }
+
+    let tool_name = raw_tool_name.trim();
+    if tool_name.is_empty() {
+        warn!(
+            phase = "drop_tool_use",
+            reason = "empty_name",
+            tool_id,
+            "Dropping assistant tool_use block"
+        );
+        return;
+    }
+
     let tool_input = block.get("input").cloned().unwrap_or_else(|| json!({}));
     let arguments = serde_json::to_string(&tool_input).unwrap_or_else(|_| "{}".to_string());
 

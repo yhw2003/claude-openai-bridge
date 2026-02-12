@@ -1,4 +1,5 @@
 use serde_json::{Value, json};
+use tracing::warn;
 use uuid::Uuid;
 
 use crate::constants::{
@@ -88,13 +89,28 @@ fn map_tool_call(tool_call: &Value) -> Option<Value> {
     let arguments_value = serde_json::from_str::<Value>(arguments_raw)
         .unwrap_or_else(|_| json!({ "raw_arguments": arguments_raw }));
 
+    let Some(raw_tool_call_id) = tool_call.get("id").and_then(Value::as_str) else {
+        warn!(
+            phase = "drop_tool_use",
+            reason = "missing_tool_call_id",
+            "Dropping upstream tool_call without id"
+        );
+        return None;
+    };
+
+    let tool_call_id = raw_tool_call_id.trim();
+    if tool_call_id.is_empty() {
+        warn!(
+            phase = "drop_tool_use",
+            reason = "empty_tool_call_id",
+            "Dropping upstream tool_call with empty id"
+        );
+        return None;
+    }
+
     Some(json!({
         "type": CONTENT_TOOL_USE,
-        "id": tool_call
-            .get("id")
-            .and_then(Value::as_str)
-            .map(ToOwned::to_owned)
-            .unwrap_or_else(|| format!("tool_{}", Uuid::new_v4())),
+        "id": tool_call_id,
         "name": function_data
             .get("name")
             .and_then(Value::as_str)
@@ -145,5 +161,105 @@ pub fn map_finish_reason(finish_reason: &str) -> &str {
         "length" => STOP_MAX_TOKENS,
         "tool_calls" | "function_call" => STOP_TOOL_USE,
         _ => STOP_END_TURN,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn empty_request() -> ClaudeMessagesRequest {
+        ClaudeMessagesRequest {
+            model: "claude-3-5-sonnet-20241022".to_string(),
+            max_tokens: 256,
+            messages: vec![],
+            system: None,
+            stop_sequences: None,
+            stream: Some(false),
+            temperature: Some(1.0),
+            top_p: None,
+            tools: None,
+            tool_choice: None,
+        }
+    }
+
+    #[test]
+    fn skips_tool_call_without_id() {
+        let openai_response = json!({
+            "id": "chatcmpl_test",
+            "choices": [{
+                "finish_reason": "tool_calls",
+                "message": {
+                    "content": null,
+                    "tool_calls": [{
+                        "type": "function",
+                        "function": {
+                            "name": "Bash",
+                            "arguments": "{}"
+                        }
+                    }]
+                }
+            }],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1}
+        });
+
+        let converted = convert_openai_to_claude_response(&openai_response, &empty_request())
+            .expect("conversion should succeed");
+        let content = converted
+            .get("content")
+            .and_then(Value::as_array)
+            .expect("content should be array");
+
+        assert_eq!(content.len(), 1);
+        assert_eq!(content[0].get("type").and_then(Value::as_str), Some("text"));
+        assert_eq!(content[0].get("text").and_then(Value::as_str), Some(""));
+    }
+
+    #[test]
+    fn keeps_tool_call_with_valid_id() {
+        let openai_response = json!({
+            "id": "chatcmpl_test",
+            "choices": [{
+                "finish_reason": "tool_calls",
+                "message": {
+                    "content": null,
+                    "tool_calls": [{
+                        "id": "call_abc123",
+                        "type": "function",
+                        "function": {
+                            "name": "Bash",
+                            "arguments": "{\"command\":\"cargo fmt\"}"
+                        }
+                    }]
+                }
+            }],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1}
+        });
+
+        let converted = convert_openai_to_claude_response(&openai_response, &empty_request())
+            .expect("conversion should succeed");
+        let content = converted
+            .get("content")
+            .and_then(Value::as_array)
+            .expect("content should be array");
+
+        assert_eq!(content.len(), 1);
+        assert_eq!(
+            content[0].get("type").and_then(Value::as_str),
+            Some("tool_use")
+        );
+        assert_eq!(
+            content[0].get("id").and_then(Value::as_str),
+            Some("call_abc123")
+        );
+        assert_eq!(content[0].get("name").and_then(Value::as_str), Some("Bash"));
+        assert_eq!(
+            content[0]
+                .get("input")
+                .and_then(|v| v.get("command"))
+                .and_then(Value::as_str),
+            Some("cargo fmt")
+        );
     }
 }

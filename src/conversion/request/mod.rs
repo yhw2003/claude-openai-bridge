@@ -5,8 +5,10 @@ mod tool_result;
 mod tools;
 mod user;
 
+use std::collections::HashSet;
+
 use serde_json::{Value, json};
-use tracing::{debug, trace};
+use tracing::{debug, trace, warn};
 
 use crate::config::Config;
 use crate::constants::{ROLE_ASSISTANT, ROLE_SYSTEM, ROLE_USER};
@@ -96,10 +98,37 @@ fn push_system_message(request: &ClaudeMessagesRequest, openai_messages: &mut Ve
 }
 
 fn convert_message_list(messages: &[ClaudeMessage], openai_messages: &mut Vec<Value>) {
+    let mut seen_tool_call_ids = HashSet::new();
+
     for message in messages {
         if message.role == ROLE_USER {
             if is_tool_result_user_message(message) {
-                openai_messages.extend(convert_claude_tool_results(message));
+                for tool_message in convert_claude_tool_results(message) {
+                    let Some(tool_call_id) =
+                        tool_message.get("tool_call_id").and_then(Value::as_str)
+                    else {
+                        warn!(
+                            phase = "drop_tool_result",
+                            reason = "missing_tool_call_id_in_converted_message",
+                            "Dropping converted tool message"
+                        );
+                        continue;
+                    };
+
+                    let normalized_tool_call_id = tool_call_id.trim();
+                    if !seen_tool_call_ids.contains(normalized_tool_call_id) {
+                        warn!(
+                            phase = "drop_tool_result",
+                            reason = "unknown_tool_call_id",
+                            tool_call_id = normalized_tool_call_id,
+                            known_ids_count = seen_tool_call_ids.len(),
+                            "Dropping tool message with unknown tool_call_id"
+                        );
+                        continue;
+                    }
+
+                    openai_messages.push(tool_message);
+                }
             }
 
             if has_non_tool_result_content(message) {
@@ -109,7 +138,23 @@ fn convert_message_list(messages: &[ClaudeMessage], openai_messages: &mut Vec<Va
         }
 
         if message.role == ROLE_ASSISTANT {
-            openai_messages.push(convert_claude_assistant_message(message));
+            let assistant_message = convert_claude_assistant_message(message);
+
+            if let Some(tool_calls) = assistant_message
+                .get("tool_calls")
+                .and_then(Value::as_array)
+            {
+                for tool_call in tool_calls {
+                    if let Some(tool_call_id) = tool_call.get("id").and_then(Value::as_str) {
+                        let normalized_tool_call_id = tool_call_id.trim();
+                        if !normalized_tool_call_id.is_empty() {
+                            seen_tool_call_ids.insert(normalized_tool_call_id.to_string());
+                        }
+                    }
+                }
+            }
+
+            openai_messages.push(assistant_message);
         }
     }
 }
@@ -153,38 +198,11 @@ mod tests {
         }
     }
 
-    #[test]
-    fn preserves_tool_result_and_non_tool_user_content() {
-        let request = ClaudeMessagesRequest {
+    fn make_request(messages: Vec<ClaudeMessage>) -> ClaudeMessagesRequest {
+        ClaudeMessagesRequest {
             model: "claude-3-5-sonnet-20241022".to_string(),
             max_tokens: 256,
-            messages: vec![
-                ClaudeMessage {
-                    role: ROLE_ASSISTANT.to_string(),
-                    content: Some(json!([
-                        {
-                            "type": "tool_use",
-                            "id": "call_test123",
-                            "name": "Bash",
-                            "input": {"command": "cargo fmt"}
-                        }
-                    ])),
-                },
-                ClaudeMessage {
-                    role: ROLE_USER.to_string(),
-                    content: Some(json!([
-                        {
-                            "type": "tool_result",
-                            "tool_use_id": "call_test123",
-                            "content": "ok"
-                        },
-                        {
-                            "type": "text",
-                            "text": "继续"
-                        }
-                    ])),
-                },
-            ],
+            messages,
             system: None,
             stop_sequences: None,
             stream: Some(false),
@@ -192,7 +210,38 @@ mod tests {
             top_p: None,
             tools: None,
             tool_choice: None,
-        };
+        }
+    }
+
+    #[test]
+    fn preserves_tool_result_and_non_tool_user_content() {
+        let request = make_request(vec![
+            ClaudeMessage {
+                role: ROLE_ASSISTANT.to_string(),
+                content: Some(json!([
+                    {
+                        "type": "tool_use",
+                        "id": "call_test123",
+                        "name": "Bash",
+                        "input": {"command": "cargo fmt"}
+                    }
+                ])),
+            },
+            ClaudeMessage {
+                role: ROLE_USER.to_string(),
+                content: Some(json!([
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": "call_test123",
+                        "content": "ok"
+                    },
+                    {
+                        "type": "text",
+                        "text": "继续"
+                    }
+                ])),
+            },
+        ]);
 
         let converted = convert_claude_to_openai(&request, &test_config());
         let messages = converted
@@ -215,6 +264,169 @@ mod tests {
         );
         assert_eq!(
             messages[2].get("role").and_then(Value::as_str),
+            Some("user")
+        );
+    }
+
+    #[test]
+    fn drops_assistant_tool_use_with_empty_id() {
+        let request = make_request(vec![ClaudeMessage {
+            role: ROLE_ASSISTANT.to_string(),
+            content: Some(json!([
+                {
+                    "type": "tool_use",
+                    "id": "   ",
+                    "name": "Bash",
+                    "input": {"command": "cargo fmt"}
+                }
+            ])),
+        }]);
+
+        let converted = convert_claude_to_openai(&request, &test_config());
+        let messages = converted
+            .get("messages")
+            .and_then(Value::as_array)
+            .expect("messages should be an array");
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(
+            messages[0].get("role").and_then(Value::as_str),
+            Some("assistant")
+        );
+        assert!(messages[0].get("tool_calls").is_none());
+    }
+
+    #[test]
+    fn drops_tool_result_with_empty_tool_use_id() {
+        let request = make_request(vec![
+            ClaudeMessage {
+                role: ROLE_ASSISTANT.to_string(),
+                content: Some(json!([
+                    {
+                        "type": "tool_use",
+                        "id": "call_test123",
+                        "name": "Bash",
+                        "input": {"command": "cargo fmt"}
+                    }
+                ])),
+            },
+            ClaudeMessage {
+                role: ROLE_USER.to_string(),
+                content: Some(json!([
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": "   ",
+                        "content": "ok"
+                    },
+                    {
+                        "type": "text",
+                        "text": "继续"
+                    }
+                ])),
+            },
+        ]);
+
+        let converted = convert_claude_to_openai(&request, &test_config());
+        let messages = converted
+            .get("messages")
+            .and_then(Value::as_array)
+            .expect("messages should be an array");
+
+        assert_eq!(messages.len(), 2);
+        assert!(
+            messages
+                .iter()
+                .all(|message| message.get("role").and_then(Value::as_str) != Some("tool"))
+        );
+        assert_eq!(
+            messages[1].get("role").and_then(Value::as_str),
+            Some("user")
+        );
+    }
+
+    #[test]
+    fn drops_tool_result_with_unknown_tool_call_id() {
+        let request = make_request(vec![
+            ClaudeMessage {
+                role: ROLE_ASSISTANT.to_string(),
+                content: Some(json!([
+                    {
+                        "type": "tool_use",
+                        "id": "call_known",
+                        "name": "Bash",
+                        "input": {"command": "cargo fmt"}
+                    }
+                ])),
+            },
+            ClaudeMessage {
+                role: ROLE_USER.to_string(),
+                content: Some(json!([
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": "call_unknown",
+                        "content": "ok"
+                    }
+                ])),
+            },
+        ]);
+
+        let converted = convert_claude_to_openai(&request, &test_config());
+        let messages = converted
+            .get("messages")
+            .and_then(Value::as_array)
+            .expect("messages should be an array");
+
+        assert_eq!(messages.len(), 1);
+        assert!(
+            messages
+                .iter()
+                .all(|message| message.get("role").and_then(Value::as_str) != Some("tool"))
+        );
+    }
+
+    #[test]
+    fn preserves_user_text_when_unknown_tool_result_filtered() {
+        let request = make_request(vec![
+            ClaudeMessage {
+                role: ROLE_ASSISTANT.to_string(),
+                content: Some(json!([
+                    {
+                        "type": "tool_use",
+                        "id": "call_known",
+                        "name": "Bash",
+                        "input": {"command": "cargo fmt"}
+                    }
+                ])),
+            },
+            ClaudeMessage {
+                role: ROLE_USER.to_string(),
+                content: Some(json!([
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": "call_unknown",
+                        "content": "ok"
+                    },
+                    {
+                        "type": "text",
+                        "text": "继续"
+                    }
+                ])),
+            },
+        ]);
+
+        let converted = convert_claude_to_openai(&request, &test_config());
+        let messages = converted
+            .get("messages")
+            .and_then(Value::as_array)
+            .expect("messages should be an array");
+
+        assert_eq!(messages.len(), 2);
+        assert_eq!(
+            messages[0].get("role").and_then(Value::as_str),
+            Some("assistant")
+        );
+        assert_eq!(
+            messages[1].get("role").and_then(Value::as_str),
             Some("user")
         );
     }

@@ -1,4 +1,5 @@
 use serde_json::{Value, json};
+use tracing::warn;
 
 use crate::constants::{CONTENT_TEXT, CONTENT_TOOL_RESULT, ROLE_TOOL, ROLE_USER};
 use crate::models::ClaudeMessage;
@@ -14,7 +15,7 @@ pub fn convert_claude_tool_results(message: &ClaudeMessage) -> Vec<Value> {
     blocks
         .iter()
         .filter(|block| block.get("type").and_then(Value::as_str) == Some(CONTENT_TOOL_RESULT))
-        .map(convert_tool_result_block)
+        .filter_map(convert_tool_result_block)
         .collect()
 }
 
@@ -56,18 +57,32 @@ pub fn has_non_tool_result_content(message: &ClaudeMessage) -> bool {
         .any(|block| block.get("type").and_then(Value::as_str) != Some(CONTENT_TOOL_RESULT))
 }
 
-fn convert_tool_result_block(block: &Value) -> Value {
-    let tool_use_id = block
-        .get("tool_use_id")
-        .and_then(Value::as_str)
-        .unwrap_or_default();
+fn convert_tool_result_block(block: &Value) -> Option<Value> {
+    let Some(raw_tool_use_id) = block.get("tool_use_id").and_then(Value::as_str) else {
+        warn!(
+            phase = "drop_tool_result",
+            reason = "missing_tool_use_id",
+            "Dropping tool_result block"
+        );
+        return None;
+    };
+
+    let tool_use_id = raw_tool_use_id.trim();
+    if tool_use_id.is_empty() {
+        warn!(
+            phase = "drop_tool_result",
+            reason = "empty_tool_use_id",
+            "Dropping tool_result block"
+        );
+        return None;
+    }
 
     let normalized_content = parse_tool_result_content(block.get("content"));
-    json!({
+    Some(json!({
         "role": ROLE_TOOL,
         "tool_call_id": tool_use_id,
         "content": normalized_content,
-    })
+    }))
 }
 
 fn parse_tool_result_content(content: Option<&Value>) -> String {
