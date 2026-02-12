@@ -33,7 +33,11 @@ pub fn convert_claude_to_openai(request: &ClaudeMessagesRequest, config: &Config
     let mut openai_messages: Vec<Value> = Vec::new();
 
     push_system_message(request, &mut openai_messages);
-    convert_message_list(&request.messages, &mut openai_messages);
+    convert_message_list(
+        &request.messages,
+        &mut openai_messages,
+        config.debug_tool_id_matching,
+    );
 
     let mut openai_request = build_request_base(request, mapped_model, openai_messages);
     add_optional_request_fields(request, &mut openai_request);
@@ -97,7 +101,11 @@ fn push_system_message(request: &ClaudeMessagesRequest, openai_messages: &mut Ve
     openai_messages.push(json!({"role": ROLE_SYSTEM, "content": system_text.trim()}));
 }
 
-fn convert_message_list(messages: &[ClaudeMessage], openai_messages: &mut Vec<Value>) {
+fn convert_message_list(
+    messages: &[ClaudeMessage],
+    openai_messages: &mut Vec<Value>,
+    debug_tool_id_matching: bool,
+) {
     let mut seen_tool_call_ids = HashSet::new();
 
     for message in messages {
@@ -117,13 +125,28 @@ fn convert_message_list(messages: &[ClaudeMessage], openai_messages: &mut Vec<Va
 
                     let normalized_tool_call_id = tool_call_id.trim();
                     if !seen_tool_call_ids.contains(normalized_tool_call_id) {
-                        warn!(
-                            phase = "drop_tool_result",
-                            reason = "unknown_tool_call_id",
-                            tool_call_id = normalized_tool_call_id,
-                            known_ids_count = seen_tool_call_ids.len(),
-                            "Dropping tool message with unknown tool_call_id"
-                        );
+                        if debug_tool_id_matching {
+                            let mut known_tool_call_ids: Vec<&str> =
+                                seen_tool_call_ids.iter().map(String::as_str).collect();
+                            known_tool_call_ids.sort_unstable();
+
+                            warn!(
+                                phase = "drop_tool_result",
+                                reason = "unknown_tool_call_id",
+                                tool_call_id = normalized_tool_call_id,
+                                known_ids_count = known_tool_call_ids.len(),
+                                ?known_tool_call_ids,
+                                "Dropping tool message with unknown tool_call_id"
+                            );
+                        } else {
+                            warn!(
+                                phase = "drop_tool_result",
+                                reason = "unknown_tool_call_id",
+                                tool_call_id = normalized_tool_call_id,
+                                known_ids_count = seen_tool_call_ids.len(),
+                                "Dropping tool message with unknown tool_call_id"
+                            );
+                        }
                         continue;
                     }
 
@@ -191,6 +214,7 @@ mod tests {
             request_timeout: 90,
             stream_request_timeout: None,
             request_body_max_size: 16 * 1024 * 1024,
+            debug_tool_id_matching: false,
             big_model: "gpt-4o".to_string(),
             middle_model: "gpt-4o".to_string(),
             small_model: "gpt-4o-mini".to_string(),

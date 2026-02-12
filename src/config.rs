@@ -13,6 +13,7 @@ pub struct Config {
     pub request_timeout: u64,
     pub stream_request_timeout: Option<u64>,
     pub request_body_max_size: usize,
+    pub debug_tool_id_matching: bool,
     pub big_model: String,
     pub middle_model: String,
     pub small_model: String,
@@ -36,6 +37,7 @@ impl Config {
             request_timeout: env_u64("REQUEST_TIMEOUT", 90),
             stream_request_timeout: env_optional_u64("STREAM_REQUEST_TIMEOUT"),
             request_body_max_size: env_usize("REQUEST_BODY_MAX_SIZE", 16 * 1024 * 1024),
+            debug_tool_id_matching: env_bool("DEBUG_TOOL_ID_MATCHING", false),
             big_model: env::var("BIG_MODEL").unwrap_or_else(|_| "gpt-4o".to_string()),
             middle_model: env::var("MIDDLE_MODEL")
                 .unwrap_or_else(|_| env::var("BIG_MODEL").unwrap_or_else(|_| "gpt-4o".to_string())),
@@ -89,6 +91,18 @@ fn env_optional_u64(key: &str) -> Option<u64> {
         .ok()
         .and_then(|value| value.parse::<u64>().ok())
         .filter(|value| *value > 0)
+}
+
+fn env_bool(key: &str, default: bool) -> bool {
+    env::var(key)
+        .ok()
+        .map(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+        .unwrap_or(default)
 }
 
 fn env_usize(key: &str, default: usize) -> usize {

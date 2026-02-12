@@ -71,6 +71,7 @@ ANTHROPIC_BASE_URL=http://localhost:8082 ANTHROPIC_API_KEY="any-value" claude
 - `REQUEST_TIMEOUT`（默认：`90`，非流式请求超时）
 - `STREAM_REQUEST_TIMEOUT`（可选；>0 时生效，流式请求总超时）
 - `REQUEST_BODY_MAX_SIZE`（默认：`16777216`，16MB）
+- `DEBUG_TOOL_ID_MATCHING`（默认：`false`；为 `true` 时输出更详细的 tool id 匹配诊断日志）
 - `CUSTOM_HEADER_*`（可选，自定义上游请求头）
 
 ### `CUSTOM_HEADER_*` 说明
