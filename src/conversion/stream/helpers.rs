@@ -1,5 +1,5 @@
-use serde::Deserialize;
 use serde::de::IgnoredAny;
+use serde::Deserialize;
 
 use crate::conversion::response::map_finish_reason;
 use crate::conversion::stream::state::{StreamState, StreamUsage};
@@ -76,6 +76,22 @@ pub fn content_delta(choice: &StreamChoice) -> Option<&str> {
         .and_then(|delta| delta.content.as_deref())
 }
 
+pub fn thinking_delta(choice: &StreamChoice) -> Option<&str> {
+    choice.delta.as_ref().and_then(|delta| {
+        delta
+            .reasoning_content
+            .as_deref()
+            .or(delta.reasoning.as_deref())
+    })
+}
+
+pub fn thinking_signature_delta(choice: &StreamChoice) -> Option<&str> {
+    choice
+        .delta
+        .as_ref()
+        .and_then(|delta| delta.signature.as_deref())
+}
+
 pub fn tool_call_deltas(choice: &StreamChoice) -> Option<&Vec<ToolCallDelta>> {
     choice
         .delta
@@ -129,6 +145,9 @@ pub struct StreamChoice {
 #[derive(Debug, Deserialize)]
 pub struct StreamDelta {
     pub content: Option<String>,
+    pub reasoning_content: Option<String>,
+    pub reasoning: Option<String>,
+    pub signature: Option<String>,
     pub tool_calls: Option<Vec<ToolCallDelta>>,
 }
 

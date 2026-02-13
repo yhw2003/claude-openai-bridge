@@ -14,6 +14,8 @@ pub struct StreamUsage {
 
 pub struct StreamState {
     pub text_block_index: usize,
+    pub thinking_block_index: Option<usize>,
+    pub thinking_started: bool,
     pub tool_block_counter: usize,
     pub tool_calls: BTreeMap<usize, StreamingToolCallState>,
     pub final_stop_reason: String,
@@ -24,6 +26,8 @@ impl StreamState {
     pub fn new() -> Self {
         Self {
             text_block_index: 0,
+            thinking_block_index: None,
+            thinking_started: false,
             tool_block_counter: 0,
             tool_calls: BTreeMap::new(),
             final_stop_reason: "end_turn".to_string(),

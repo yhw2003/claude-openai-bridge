@@ -4,6 +4,13 @@ pub const ROLE_SYSTEM: &str = "system";
 pub const ROLE_TOOL: &str = "tool";
 
 pub const CONTENT_TEXT: &str = "text";
+#[allow(dead_code)]
+pub const CONTENT_IMAGE: &str = "image";
+#[allow(dead_code)]
+pub const CONTENT_TOOL_USE: &str = "tool_use";
+#[allow(dead_code)]
+pub const CONTENT_TOOL_RESULT: &str = "tool_result";
+pub const CONTENT_THINKING: &str = "thinking";
 
 pub const TOOL_FUNCTION: &str = "function";
 
@@ -21,3 +28,5 @@ pub const EVENT_PING: &str = "ping";
 
 pub const DELTA_TEXT: &str = "text_delta";
 pub const DELTA_INPUT_JSON: &str = "input_json_delta";
+pub const DELTA_THINKING: &str = "thinking_delta";
+pub const DELTA_SIGNATURE: &str = "signature_delta";

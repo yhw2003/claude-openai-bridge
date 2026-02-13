@@ -2,9 +2,9 @@ use salvo::http::body::BodySender;
 use serde::Serialize;
 
 use crate::constants::{
-    CONTENT_TEXT, DELTA_INPUT_JSON, DELTA_TEXT, EVENT_CONTENT_BLOCK_DELTA,
-    EVENT_CONTENT_BLOCK_START, EVENT_CONTENT_BLOCK_STOP, EVENT_MESSAGE_DELTA, EVENT_MESSAGE_START,
-    EVENT_MESSAGE_STOP, EVENT_PING, ROLE_ASSISTANT,
+    CONTENT_TEXT, CONTENT_THINKING, DELTA_INPUT_JSON, DELTA_SIGNATURE, DELTA_TEXT, DELTA_THINKING,
+    EVENT_CONTENT_BLOCK_DELTA, EVENT_CONTENT_BLOCK_START, EVENT_CONTENT_BLOCK_STOP,
+    EVENT_MESSAGE_DELTA, EVENT_MESSAGE_START, EVENT_MESSAGE_STOP, EVENT_PING, ROLE_ASSISTANT,
 };
 use crate::conversion::stream::state::{StreamState, StreamUsage};
 
@@ -107,6 +107,57 @@ pub async fn send_tool_json_delta(
     send_sse(sender, EVENT_CONTENT_BLOCK_DELTA, &event).await
 }
 
+pub async fn send_thinking_block_start(
+    sender: &mut BodySender,
+    claude_index: usize,
+) -> std::io::Result<()> {
+    let event = ContentBlockStartEvent {
+        event_type: EVENT_CONTENT_BLOCK_START,
+        index: claude_index,
+        content_block: ThinkingContentBlock {
+            block_type: CONTENT_THINKING,
+            thinking: "",
+            signature: "",
+        },
+    };
+
+    send_sse(sender, EVENT_CONTENT_BLOCK_START, &event).await
+}
+
+pub async fn send_thinking_delta(
+    sender: &mut BodySender,
+    claude_index: usize,
+    payload: &str,
+) -> std::io::Result<()> {
+    let event = ContentBlockDeltaEvent {
+        event_type: EVENT_CONTENT_BLOCK_DELTA,
+        index: claude_index,
+        delta: ThinkingDeltaPayload {
+            delta_type: DELTA_THINKING,
+            thinking: payload,
+        },
+    };
+
+    send_sse(sender, EVENT_CONTENT_BLOCK_DELTA, &event).await
+}
+
+pub async fn send_signature_delta(
+    sender: &mut BodySender,
+    claude_index: usize,
+    payload: &str,
+) -> std::io::Result<()> {
+    let event = ContentBlockDeltaEvent {
+        event_type: EVENT_CONTENT_BLOCK_DELTA,
+        index: claude_index,
+        delta: SignatureDeltaPayload {
+            delta_type: DELTA_SIGNATURE,
+            signature: payload,
+        },
+    };
+
+    send_sse(sender, EVENT_CONTENT_BLOCK_DELTA, &event).await
+}
+
 pub async fn send_stop_sequence(
     sender: &mut BodySender,
     state: &StreamState,
@@ -120,6 +171,18 @@ pub async fn send_stop_sequence(
         },
     )
     .await?;
+
+    if let Some(thinking_index) = state.thinking_block_index {
+        send_sse(
+            sender,
+            EVENT_CONTENT_BLOCK_STOP,
+            &TypeWithIndexEvent {
+                event_type: EVENT_CONTENT_BLOCK_STOP,
+                index: thinking_index,
+            },
+        )
+        .await?;
+    }
 
     for tool_call_state in state.tool_calls.values() {
         let Some(claude_index) =
@@ -234,6 +297,14 @@ struct TextContentBlock<'a> {
 }
 
 #[derive(Serialize)]
+struct ThinkingContentBlock<'a> {
+    #[serde(rename = "type")]
+    block_type: &'static str,
+    thinking: &'a str,
+    signature: &'a str,
+}
+
+#[derive(Serialize)]
 struct ToolUseContentBlock<'a> {
     #[serde(rename = "type")]
     block_type: &'static str,
@@ -255,6 +326,20 @@ struct TextDeltaPayload<'a> {
     #[serde(rename = "type")]
     delta_type: &'static str,
     text: &'a str,
+}
+
+#[derive(Serialize)]
+struct ThinkingDeltaPayload<'a> {
+    #[serde(rename = "type")]
+    delta_type: &'static str,
+    thinking: &'a str,
+}
+
+#[derive(Serialize)]
+struct SignatureDeltaPayload<'a> {
+    #[serde(rename = "type")]
+    delta_type: &'static str,
+    signature: &'a str,
 }
 
 #[derive(Serialize)]
