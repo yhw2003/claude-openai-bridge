@@ -5,12 +5,17 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tracing::{debug, error, trace};
 
+use crate::config::WireApi;
 use crate::conversion::request::{
-    OpenAiChatRequest, OpenAiMessage, OpenAiUserMessage, convert_claude_to_openai,
-    is_thinking_requested,
+    OpenAiChatRequest, OpenAiMessage, OpenAiResponsesRequest, OpenAiUserMessage,
+    convert_claude_to_openai, convert_claude_to_responses, is_thinking_requested,
 };
-use crate::conversion::response::convert_openai_to_claude_response;
-use crate::conversion::stream::stream_openai_to_claude_sse;
+use crate::conversion::response::{
+    convert_openai_responses_to_claude_response, convert_openai_to_claude_response,
+};
+use crate::conversion::stream::{
+    stream_openai_responses_to_claude_sse, stream_openai_to_claude_sse,
+};
 use crate::models::{ClaudeMessagesRequest, ClaudeTokenCountRequest};
 use crate::state::app_state;
 use crate::utils::now_timestamp_string;
@@ -58,30 +63,12 @@ pub async fn create_message(req: &mut Request, res: &mut Response) {
         "Received downstream request (summary)"
     );
 
-    let mut openai_request = convert_claude_to_openai(&request, &state.config);
     let thinking_requested = is_thinking_requested(request.thinking.as_ref());
-    if request.stream.unwrap_or(false) {
-        handle_streaming_request(res, request, &mut openai_request, thinking_requested).await;
-        return;
+
+    match state.config.wire_api {
+        WireApi::Chat => handle_chat_message(res, request, thinking_requested).await,
+        WireApi::Responses => handle_responses_message(res, request, thinking_requested).await,
     }
-
-    let openai_response = match state.upstream.chat_completion(&openai_request).await {
-        Ok(value) => value,
-        Err(error) => {
-            upstream_failed(res, error.status, &error.message);
-            return;
-        }
-    };
-
-    let claude_response = match convert_openai_to_claude_response(&openai_response, &request) {
-        Ok(value) => value,
-        Err(message) => {
-            internal_error(res, &message);
-            return;
-        }
-    };
-
-    res.render(Json(claude_response));
 }
 
 #[handler]
@@ -138,24 +125,20 @@ pub async fn health_check(res: &mut Response) {
 #[handler]
 pub async fn test_connection(res: &mut Response) {
     let state = app_state();
-    let test_request = OpenAiChatRequest {
-        model: state.config.small_model.clone(),
-        messages: vec![OpenAiMessage::User(OpenAiUserMessage::from_text(
-            "Hello".to_string(),
-        ))],
-        max_tokens: 5,
-        temperature: 1.0,
-        reasoning_effort: None,
-        stream: false,
-        stream_options: None,
-        stop: None,
-        top_p: None,
-        tools: None,
-        tool_choice: None,
+
+    let upstream_result = match state.config.wire_api {
+        WireApi::Chat => run_chat_connection_test(state).await,
+        WireApi::Responses => run_responses_connection_test(state).await,
     };
 
-    let upstream_response = match state.upstream.chat_completion(&test_request).await {
-        Ok(value) => value,
+    match upstream_result {
+        Ok(response_id) => res.render(Json(ConnectionTestSuccessResponse {
+            status: "success".to_string(),
+            message: "Successfully connected to upstream OpenAI-compatible API".to_string(),
+            model_used: state.config.small_model.clone(),
+            timestamp: now_timestamp_string(),
+            response_id,
+        })),
         Err(error) => {
             error!("Connection test failed: {}", error.message);
             res.status_code(StatusCode::SERVICE_UNAVAILABLE);
@@ -170,17 +153,8 @@ pub async fn test_connection(res: &mut Response) {
                     "Check provider rate limits".to_string(),
                 ],
             }));
-            return;
         }
-    };
-
-    res.render(Json(ConnectionTestSuccessResponse {
-        status: "success".to_string(),
-        message: "Successfully connected to upstream OpenAI-compatible API".to_string(),
-        model_used: state.config.small_model.clone(),
-        timestamp: now_timestamp_string(),
-        response_id: upstream_response.id().unwrap_or("unknown").to_string(),
-    }));
+    }
 }
 
 #[handler]
@@ -193,6 +167,7 @@ pub async fn root(res: &mut Response) {
             openai_base_url: config.openai_base_url.clone(),
             api_key_configured: !config.openai_api_key.is_empty(),
             client_api_key_validation: config.anthropic_api_key.is_some(),
+            wire_api: wire_api_name(&config.wire_api),
             big_model: config.big_model.clone(),
             middle_model: config.middle_model.clone(),
             small_model: config.small_model.clone(),
@@ -223,14 +198,73 @@ async fn parse_messages_request(
     }
 }
 
-async fn handle_streaming_request(
+async fn handle_chat_message(
+    res: &mut Response,
+    request: ClaudeMessagesRequest,
+    thinking_requested: bool,
+) {
+    let state = app_state();
+    let mut openai_request = convert_claude_to_openai(&request, &state.config);
+
+    if request.stream.unwrap_or(false) {
+        handle_chat_streaming_request(res, request, &mut openai_request, thinking_requested).await;
+        return;
+    }
+
+    let openai_response = match state.upstream.chat_completion(&openai_request).await {
+        Ok(value) => value,
+        Err(error) => {
+            upstream_failed(res, error.status, &error.message);
+            return;
+        }
+    };
+
+    match convert_openai_to_claude_response(&openai_response, &request) {
+        Ok(value) => res.render(Json(value)),
+        Err(message) => internal_error(res, &message),
+    }
+}
+
+async fn handle_responses_message(
+    res: &mut Response,
+    request: ClaudeMessagesRequest,
+    thinking_requested: bool,
+) {
+    let state = app_state();
+    let mut responses_request = convert_claude_to_responses(&request, &state.config);
+
+    if request.stream.unwrap_or(false) {
+        handle_responses_streaming_request(
+            res,
+            request,
+            &mut responses_request,
+            thinking_requested,
+        )
+        .await;
+        return;
+    }
+
+    let upstream_response = match state.upstream.responses(&responses_request).await {
+        Ok(value) => value,
+        Err(error) => {
+            upstream_failed(res, error.status, &error.message);
+            return;
+        }
+    };
+
+    match convert_openai_responses_to_claude_response(&upstream_response, &request) {
+        Ok(value) => res.render(Json(value)),
+        Err(message) => internal_error(res, &message),
+    }
+}
+
+async fn handle_chat_streaming_request(
     res: &mut Response,
     request: ClaudeMessagesRequest,
     openai_request: &mut OpenAiChatRequest,
     thinking_requested: bool,
 ) {
     openai_request.enable_stream_usage();
-
     let upstream_response = match app_state()
         .upstream
         .chat_completion_stream(openai_request)
@@ -238,15 +272,7 @@ async fn handle_streaming_request(
     {
         Ok(value) => value,
         Err(error) => {
-            error!("Streaming upstream error: {}", error.message);
-            res.status_code(error.status);
-            res.render(Json(StreamingErrorResponse {
-                response_type: "error".to_string(),
-                error: ErrorDetail {
-                    error_type: "api_error".to_string(),
-                    message: error.message,
-                },
-            }));
+            render_streaming_error(res, error.status, error.message);
             return;
         }
     };
@@ -264,6 +290,50 @@ async fn handle_streaming_request(
     });
 }
 
+async fn handle_responses_streaming_request(
+    res: &mut Response,
+    request: ClaudeMessagesRequest,
+    responses_request: &mut OpenAiResponsesRequest,
+    thinking_requested: bool,
+) {
+    responses_request.enable_stream();
+    let upstream_response = match app_state()
+        .upstream
+        .responses_stream(responses_request)
+        .await
+    {
+        Ok(value) => value,
+        Err(error) => {
+            render_streaming_error(res, error.status, error.message);
+            return;
+        }
+    };
+
+    set_sse_headers(res);
+    let sender = res.channel();
+    tokio::spawn(async move {
+        stream_openai_responses_to_claude_sse(
+            upstream_response,
+            sender,
+            request.model.clone(),
+            thinking_requested,
+        )
+        .await;
+    });
+}
+
+fn render_streaming_error(res: &mut Response, status: StatusCode, message: String) {
+    error!("Streaming upstream error: {}", message);
+    res.status_code(status);
+    res.render(Json(StreamingErrorResponse {
+        response_type: "error".to_string(),
+        error: ErrorDetail {
+            error_type: "api_error".to_string(),
+            message,
+        },
+    }));
+}
+
 fn set_sse_headers(res: &mut Response) {
     res.status_code(StatusCode::OK);
     let _ = res.add_header("Cache-Control", "no-cache", true);
@@ -271,6 +341,50 @@ fn set_sse_headers(res: &mut Response) {
     let _ = res.add_header("Access-Control-Allow-Origin", "*", true);
     let _ = res.add_header("Access-Control-Allow-Headers", "*", true);
     let _ = res.add_header("Content-Type", "text/event-stream; charset=utf-8", true);
+}
+
+async fn run_chat_connection_test(
+    state: &crate::state::AppState,
+) -> Result<String, crate::errors::UpstreamError> {
+    let test_request = OpenAiChatRequest {
+        model: state.config.small_model.clone(),
+        messages: vec![OpenAiMessage::User(OpenAiUserMessage::from_text(
+            "Hello".to_string(),
+        ))],
+        max_tokens: 5,
+        temperature: 1.0,
+        reasoning_effort: None,
+        stream: false,
+        stream_options: None,
+        stop: None,
+        top_p: None,
+        tools: None,
+        tool_choice: None,
+    };
+
+    let response = state.upstream.chat_completion(&test_request).await?;
+    Ok(response.id().unwrap_or("unknown").to_string())
+}
+
+async fn run_responses_connection_test(
+    state: &crate::state::AppState,
+) -> Result<String, crate::errors::UpstreamError> {
+    let test_request = serde_json::json!({
+        "model": state.config.small_model.clone(),
+        "input": "Hello",
+        "max_output_tokens": 5,
+        "stream": false
+    });
+
+    let response = state.upstream.responses(&test_request).await?;
+    Ok(response.id().unwrap_or("unknown").to_string())
+}
+
+fn wire_api_name(wire_api: &WireApi) -> String {
+    match wire_api {
+        WireApi::Chat => "chat".to_string(),
+        WireApi::Responses => "responses".to_string(),
+    }
 }
 
 fn validate_client_api_key_header(req: &Request) -> Result<(), String> {
@@ -474,6 +588,7 @@ struct RootConfig {
     openai_base_url: String,
     api_key_configured: bool,
     client_api_key_validation: bool,
+    wire_api: String,
     big_model: String,
     middle_model: String,
     small_model: String,

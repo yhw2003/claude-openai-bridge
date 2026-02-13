@@ -5,6 +5,12 @@ use std::path::Path;
 
 use serde::Deserialize;
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum WireApi {
+    Chat,
+    Responses,
+}
+
 #[derive(Clone, Debug)]
 pub struct Config {
     pub openai_api_key: String,
@@ -18,6 +24,7 @@ pub struct Config {
     pub stream_request_timeout: Option<u64>,
     pub request_body_max_size: usize,
     pub debug_tool_id_matching: bool,
+    pub wire_api: WireApi,
     pub big_model: String,
     pub middle_model: String,
     pub small_model: String,
@@ -37,6 +44,7 @@ struct TomlConfigRaw {
     stream_request_timeout: Option<u64>,
     request_body_max_size: Option<usize>,
     debug_tool_id_matching: Option<bool>,
+    wire_api: Option<String>,
     big_model: Option<String>,
     middle_model: Option<String>,
     small_model: Option<String>,
@@ -87,13 +95,18 @@ impl Config {
 
         let request_body_max_size = env_usize_with_fallback(
             "REQUEST_BODY_MAX_SIZE",
-            toml_config.request_body_max_size.unwrap_or(16 * 1024 * 1024),
+            toml_config
+                .request_body_max_size
+                .unwrap_or(16 * 1024 * 1024),
         );
 
         let debug_tool_id_matching = env_bool_with_fallback(
             "DEBUG_TOOL_ID_MATCHING",
             toml_config.debug_tool_id_matching.unwrap_or(false),
         );
+
+        let wire_api_raw = env::var("WIRE_API").ok().or(toml_config.wire_api);
+        let wire_api = parse_wire_api(wire_api_raw.as_deref())?;
 
         let big_model = env::var("BIG_MODEL")
             .ok()
@@ -125,6 +138,7 @@ impl Config {
             stream_request_timeout,
             request_body_max_size,
             debug_tool_id_matching,
+            wire_api,
             big_model,
             middle_model,
             small_model,
@@ -172,6 +186,20 @@ fn collect_custom_headers() -> HashMap<String, String> {
         custom_headers.insert(header_raw.replace('_', "-"), env_value);
     }
     custom_headers
+}
+
+fn parse_wire_api(value: Option<&str>) -> Result<WireApi, String> {
+    let Some(raw_value) = value.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(WireApi::Chat);
+    };
+
+    match raw_value.to_ascii_lowercase().as_str() {
+        "chat" => Ok(WireApi::Chat),
+        "responses" => Ok(WireApi::Responses),
+        _ => Err(format!(
+            "Invalid WIRE_API value '{raw_value}'. Supported values: chat, responses."
+        )),
+    }
 }
 
 fn env_u16_with_fallback(key: &str, fallback: u16) -> u16 {

@@ -1,5 +1,5 @@
-use serde::de::IgnoredAny;
 use serde::Deserialize;
+use serde::de::IgnoredAny;
 use serde_json::Value;
 
 use crate::conversion::response::map_finish_reason;
@@ -222,7 +222,7 @@ pub struct StreamDelta {
 
 #[cfg(test)]
 mod tests {
-    use super::{thinking_delta, thinking_signature_delta, StreamChoice, StreamDelta};
+    use super::{StreamChoice, StreamDelta, thinking_delta, thinking_signature_delta};
     use serde_json::json;
 
     #[test]

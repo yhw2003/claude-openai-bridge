@@ -8,6 +8,7 @@ openai_api_key = "sk-your-openai-api-key"
 
 openai_base_url = "https://api.openai.com/v1"
 # azure_api_version = "2024-10-21"
+# wire_api = "chat" # chat | responses
 
 host = "0.0.0.0"
 port = 8082

@@ -1,11 +1,15 @@
 mod assistant;
 mod models;
+mod responses_convert;
+mod responses_models;
 mod system;
 mod tool_result;
 mod tools;
 mod user;
 
 pub use models::{OpenAiChatRequest, OpenAiMessage, OpenAiUserMessage};
+pub use responses_convert::convert_claude_to_responses;
+pub use responses_models::OpenAiResponsesRequest;
 pub use tools::is_thinking_requested;
 
 use std::collections::HashSet;
@@ -202,7 +206,7 @@ fn build_request_base(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::Config;
+    use crate::config::{Config, WireApi};
     use crate::models::{ClaudeContent, ClaudeContentBlock};
     use serde_json::json;
 
@@ -219,6 +223,7 @@ mod tests {
             stream_request_timeout: None,
             request_body_max_size: 16 * 1024 * 1024,
             debug_tool_id_matching: false,
+            wire_api: WireApi::Chat,
             big_model: "gpt-4o".to_string(),
             middle_model: "gpt-4o".to_string(),
             small_model: "gpt-4o-mini".to_string(),

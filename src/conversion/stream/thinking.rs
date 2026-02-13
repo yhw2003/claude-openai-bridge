@@ -51,7 +51,9 @@ fn should_emit_realtime_fallback(choice: &StreamChoice, state: &StreamState) -> 
     }
 
     let has_content = content_delta(choice).is_some();
-    let has_tools = tool_call_deltas(choice).map(|value| !value.is_empty()).unwrap_or(false);
+    let has_tools = tool_call_deltas(choice)
+        .map(|value| !value.is_empty())
+        .unwrap_or(false);
     let has_finish = choice.finish_reason.is_some();
     has_content || has_tools || has_finish
 }
@@ -120,9 +122,15 @@ fn log_fallback_start(
         claude_index = state.thinking_block_index.unwrap_or(0),
         stop_reason = state.final_stop_reason,
         has_content_delta = content_delta(choice).is_some(),
-        has_tool_delta = tool_call_deltas(choice).map(|value| !value.is_empty()).unwrap_or(false),
+        has_tool_delta = tool_call_deltas(choice)
+            .map(|value| !value.is_empty())
+            .unwrap_or(false),
         has_finish_reason = choice.finish_reason.is_some(),
-        started_tool_calls = state.tool_calls.values().filter(|tool| tool.started).count(),
+        started_tool_calls = state
+            .tool_calls
+            .values()
+            .filter(|tool| tool.started)
+            .count(),
         "Upstream reasoning absent; emitting realtime empty thinking block"
     );
 }

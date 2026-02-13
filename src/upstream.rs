@@ -7,7 +7,7 @@ use std::time::Duration;
 use tracing::{error, warn};
 
 use crate::config::Config;
-use crate::conversion::response::OpenAiChatResponse;
+use crate::conversion::response::{OpenAiChatResponse, OpenAiResponsesResponse};
 use crate::errors::{UpstreamError, classify_openai_error, extract_error_message_from_body};
 use crate::utils::to_salvo_status;
 
@@ -30,7 +30,8 @@ impl UpstreamClient {
         body: &T,
     ) -> Result<OpenAiChatResponse, UpstreamError> {
         let response = self
-            .send_chat_request(
+            .send_request(
+                "/chat/completions",
                 body,
                 Some(Duration::from_secs(self.config.request_timeout)),
                 "non_stream",
@@ -52,18 +53,54 @@ impl UpstreamClient {
         body: &T,
     ) -> Result<reqwest::Response, UpstreamError> {
         let stream_timeout = self.config.stream_request_timeout.map(Duration::from_secs);
-        self.send_chat_request(body, stream_timeout, "stream").await
+        self.send_request("/chat/completions", body, stream_timeout, "stream")
+            .await
     }
 
-    async fn send_chat_request<T: Serialize + ?Sized>(
+    pub async fn responses<T: Serialize + ?Sized>(
         &self,
+        body: &T,
+    ) -> Result<OpenAiResponsesResponse, UpstreamError> {
+        let response = self
+            .send_request(
+                "/responses",
+                body,
+                Some(Duration::from_secs(self.config.request_timeout)),
+                "non_stream",
+            )
+            .await?;
+
+        response
+            .json::<OpenAiResponsesResponse>()
+            .await
+            .map_err(|error| UpstreamError {
+                status: salvo::http::StatusCode::BAD_GATEWAY,
+                message: classify_openai_error(&format!(
+                    "failed to parse upstream JSON response: {error}"
+                )),
+            })
+    }
+
+    pub async fn responses_stream<T: Serialize + ?Sized>(
+        &self,
+        body: &T,
+    ) -> Result<reqwest::Response, UpstreamError> {
+        let stream_timeout = self.config.stream_request_timeout.map(Duration::from_secs);
+        self.send_request("/responses", body, stream_timeout, "stream")
+            .await
+    }
+
+    async fn send_request<T: Serialize + ?Sized>(
+        &self,
+        path: &str,
         body: &T,
         timeout: Option<Duration>,
         request_kind: &'static str,
     ) -> Result<reqwest::Response, UpstreamError> {
         let url = format!(
-            "{}/chat/completions",
-            self.config.openai_base_url.trim_end_matches('/')
+            "{}{}",
+            self.config.openai_base_url.trim_end_matches('/'),
+            path
         );
 
         let mut request_builder = self

@@ -153,3 +153,22 @@ cargo check
 cargo test
 cargo clippy --all-targets --all-features
 ```
+
+## Wire API Selection
+
+This bridge now supports two upstream wire APIs:
+
+- `chat` (default): calls `/chat/completions`
+- `responses`: calls `/responses`
+
+Set via environment variable or config:
+
+```bash
+WIRE_API=responses
+```
+
+or in `config.toml`:
+
+```toml
+wire_api = "responses"
+```

@@ -3,8 +3,8 @@ use serde_json::{Map, Value};
 
 use crate::constants::TOOL_FUNCTION;
 use crate::conversion::request::models::{
-    supports_reasoning_effort, OpenAiChatRequest, OpenAiFunctionDefinition, OpenAiToolChoice,
-    OpenAiToolDefinition,
+    OpenAiChatRequest, OpenAiFunctionDefinition, OpenAiToolChoice, OpenAiToolDefinition,
+    supports_reasoning_effort,
 };
 use crate::models::{ClaudeMessagesRequest, ClaudeThinking, ClaudeToolChoice};
 
