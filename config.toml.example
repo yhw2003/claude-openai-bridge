@@ -4,11 +4,12 @@
 # 3) 代码默认值（最低）
 
 openai_api_key = "sk-your-openai-api-key"
+# 注意：ANTHROPIC_BASE_URL 是 Claude Code CLI 侧变量，不是本服务配置项
 # anthropic_api_key = "your-client-api-key"
 
 openai_base_url = "https://api.openai.com/v1"
 # azure_api_version = "2024-10-21"
-# wire_api = "chat" # chat | responses
+# wire_api = "chat" # 默认 chat，可选：chat | responses
 
 host = "0.0.0.0"
 port = 8082
@@ -18,6 +19,12 @@ request_timeout = 90
 # stream_request_timeout = 120
 request_body_max_size = 16777216
 
+# session_id 粘性会话配置（影响上游路由/缓存亲和性）
+session_ttl_min_secs = 1800
+session_ttl_max_secs = 86400
+session_cleanup_interval_secs = 60
+
+# 为 true 时输出更详细的 tool_call_id 匹配诊断日志
 debug_tool_id_matching = false
 
 big_model = "gpt-4o"
