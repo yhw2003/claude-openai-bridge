@@ -1,5 +1,6 @@
 use serde::de::IgnoredAny;
 use serde::Deserialize;
+use serde_json::Value;
 
 use crate::conversion::response::map_finish_reason;
 use crate::conversion::stream::state::{StreamState, StreamUsage};
@@ -77,19 +78,84 @@ pub fn content_delta(choice: &StreamChoice) -> Option<&str> {
 }
 
 pub fn thinking_delta(choice: &StreamChoice) -> Option<&str> {
-    choice.delta.as_ref().and_then(|delta| {
-        delta
-            .reasoning_content
-            .as_deref()
-            .or(delta.reasoning.as_deref())
-    })
+    if let Some(delta) = choice.delta.as_ref() {
+        if let Some(thinking) = extract_text(&delta.reasoning_content) {
+            return Some(thinking);
+        }
+        if let Some(thinking) = extract_text(&delta.reasoning) {
+            return Some(thinking);
+        }
+    }
+
+    extract_text(&choice.reasoning_content).or_else(|| extract_text(&choice.reasoning))
 }
 
 pub fn thinking_signature_delta(choice: &StreamChoice) -> Option<&str> {
-    choice
-        .delta
-        .as_ref()
-        .and_then(|delta| delta.signature.as_deref())
+    if let Some(delta) = choice.delta.as_ref()
+        && let Some(signature) = extract_signature(&delta.signature)
+    {
+        return Some(signature);
+    }
+
+    extract_signature(&choice.signature)
+}
+
+fn extract_text(value: &Option<Value>) -> Option<&str> {
+    let value = value.as_ref()?;
+    extract_text_value(value)
+}
+
+fn extract_text_value(value: &Value) -> Option<&str> {
+    match value {
+        Value::String(value) if !value.is_empty() => Some(value.as_str()),
+        Value::Object(map) => {
+            for key in [
+                "text",
+                "content",
+                "thinking",
+                "reasoning",
+                "reasoning_content",
+            ] {
+                if let Some(candidate) = map.get(key).and_then(extract_text_value) {
+                    return Some(candidate);
+                }
+            }
+            None
+        }
+        Value::Array(items) => {
+            for item in items {
+                if let Some(candidate) = extract_text_value(item) {
+                    return Some(candidate);
+                }
+            }
+            None
+        }
+        _ => None,
+    }
+}
+
+fn extract_signature(value: &Option<Value>) -> Option<&str> {
+    let value = value.as_ref()?;
+    extract_signature_value(value)
+}
+
+fn extract_signature_value(value: &Value) -> Option<&str> {
+    match value {
+        Value::String(value) if !value.is_empty() => Some(value.as_str()),
+        Value::Object(map) => map
+            .get("signature")
+            .and_then(extract_signature_value)
+            .or_else(|| map.get("value").and_then(extract_signature_value)),
+        Value::Array(items) => {
+            for item in items {
+                if let Some(signature) = extract_signature_value(item) {
+                    return Some(signature);
+                }
+            }
+            None
+        }
+        _ => None,
+    }
 }
 
 pub fn tool_call_deltas(choice: &StreamChoice) -> Option<&Vec<ToolCallDelta>> {
@@ -140,15 +206,122 @@ pub struct OpenAiStreamChunk {
 pub struct StreamChoice {
     pub finish_reason: Option<String>,
     pub delta: Option<StreamDelta>,
+    pub reasoning_content: Option<Value>,
+    pub reasoning: Option<Value>,
+    pub signature: Option<Value>,
 }
 
 #[derive(Debug, Deserialize)]
 pub struct StreamDelta {
     pub content: Option<String>,
-    pub reasoning_content: Option<String>,
-    pub reasoning: Option<String>,
-    pub signature: Option<String>,
+    pub reasoning_content: Option<Value>,
+    pub reasoning: Option<Value>,
+    pub signature: Option<Value>,
     pub tool_calls: Option<Vec<ToolCallDelta>>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{thinking_delta, thinking_signature_delta, StreamChoice, StreamDelta};
+    use serde_json::json;
+
+    #[test]
+    fn reads_reasoning_content_string_delta() {
+        let choice = StreamChoice {
+            finish_reason: None,
+            delta: Some(StreamDelta {
+                content: None,
+                reasoning_content: Some(json!("step one")),
+                reasoning: None,
+                signature: None,
+                tool_calls: None,
+            }),
+            reasoning_content: None,
+            reasoning: None,
+            signature: None,
+        };
+
+        assert_eq!(thinking_delta(&choice), Some("step one"));
+    }
+
+    #[test]
+    fn reads_reasoning_text_from_object_delta() {
+        let choice = StreamChoice {
+            finish_reason: None,
+            delta: Some(StreamDelta {
+                content: None,
+                reasoning_content: Some(json!({"text":"hidden thought"})),
+                reasoning: None,
+                signature: None,
+                tool_calls: None,
+            }),
+            reasoning_content: None,
+            reasoning: None,
+            signature: None,
+        };
+
+        assert_eq!(thinking_delta(&choice), Some("hidden thought"));
+    }
+
+    #[test]
+    fn reads_reasoning_text_from_array_delta() {
+        let choice = StreamChoice {
+            finish_reason: None,
+            delta: Some(StreamDelta {
+                content: None,
+                reasoning_content: None,
+                reasoning: Some(json!([
+                    {"type":"note"},
+                    {"content":"array thought"}
+                ])),
+                signature: None,
+                tool_calls: None,
+            }),
+            reasoning_content: None,
+            reasoning: None,
+            signature: None,
+        };
+
+        assert_eq!(thinking_delta(&choice), Some("array thought"));
+    }
+
+    #[test]
+    fn reads_choice_level_reasoning_when_delta_missing() {
+        let choice = StreamChoice {
+            finish_reason: None,
+            delta: Some(StreamDelta {
+                content: Some("answer".to_string()),
+                reasoning_content: None,
+                reasoning: None,
+                signature: None,
+                tool_calls: None,
+            }),
+            reasoning_content: Some(json!("choice-level thought")),
+            reasoning: None,
+            signature: None,
+        };
+
+        assert_eq!(thinking_delta(&choice), Some("choice-level thought"));
+    }
+
+    #[test]
+    fn reads_signature_from_object_delta() {
+        let choice = StreamChoice {
+            finish_reason: None,
+            delta: Some(StreamDelta {
+                content: None,
+                reasoning_content: None,
+                reasoning: None,
+                signature: Some(json!({"signature":"sig_abc"})),
+                tool_calls: None,
+            }),
+            reasoning_content: None,
+            reasoning: None,
+            signature: None,
+        };
+
+        assert_eq!(thinking_signature_delta(&choice), Some("sig_abc"));
+    }
 }
 
 #[derive(Debug, Deserialize)]

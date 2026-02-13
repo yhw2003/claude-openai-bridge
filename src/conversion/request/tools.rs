@@ -3,8 +3,8 @@ use serde_json::{Map, Value};
 
 use crate::constants::TOOL_FUNCTION;
 use crate::conversion::request::models::{
-    OpenAiChatRequest, OpenAiFunctionDefinition, OpenAiToolChoice, OpenAiToolDefinition,
-    supports_reasoning_effort,
+    supports_reasoning_effort, OpenAiChatRequest, OpenAiFunctionDefinition, OpenAiToolChoice,
+    OpenAiToolDefinition,
 };
 use crate::models::{ClaudeMessagesRequest, ClaudeThinking, ClaudeToolChoice};
 
@@ -36,10 +36,7 @@ pub fn derive_reasoning_effort(
     }
 
     let thinking = thinking?;
-    if !thinking_enabled(
-        thinking.thinking_type.as_deref(),
-        thinking.budget_tokens.is_some(),
-    ) {
+    if !is_thinking_requested(Some(thinking)) {
         return None;
     }
 
@@ -53,6 +50,17 @@ pub fn derive_reasoning_effort(
     };
 
     Some(effort.to_string())
+}
+
+pub fn is_thinking_requested(thinking: Option<&ClaudeThinking>) -> bool {
+    let Some(thinking) = thinking else {
+        return false;
+    };
+
+    thinking_enabled(
+        thinking.thinking_type.as_deref(),
+        thinking.budget_tokens.is_some(),
+    )
 }
 
 fn thinking_enabled(mode: Option<&str>, has_budget_tokens: bool) -> bool {

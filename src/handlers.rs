@@ -7,6 +7,7 @@ use tracing::{debug, error, trace};
 
 use crate::conversion::request::{
     OpenAiChatRequest, OpenAiMessage, OpenAiUserMessage, convert_claude_to_openai,
+    is_thinking_requested,
 };
 use crate::conversion::response::convert_openai_to_claude_response;
 use crate::conversion::stream::stream_openai_to_claude_sse;
@@ -58,8 +59,9 @@ pub async fn create_message(req: &mut Request, res: &mut Response) {
     );
 
     let mut openai_request = convert_claude_to_openai(&request, &state.config);
+    let thinking_requested = is_thinking_requested(request.thinking.as_ref());
     if request.stream.unwrap_or(false) {
-        handle_streaming_request(res, request, &mut openai_request).await;
+        handle_streaming_request(res, request, &mut openai_request, thinking_requested).await;
         return;
     }
 
@@ -225,6 +227,7 @@ async fn handle_streaming_request(
     res: &mut Response,
     request: ClaudeMessagesRequest,
     openai_request: &mut OpenAiChatRequest,
+    thinking_requested: bool,
 ) {
     openai_request.enable_stream_usage();
 
@@ -251,7 +254,13 @@ async fn handle_streaming_request(
     set_sse_headers(res);
     let sender = res.channel();
     tokio::spawn(async move {
-        stream_openai_to_claude_sse(upstream_response, sender, request.model.clone()).await;
+        stream_openai_to_claude_sse(
+            upstream_response,
+            sender,
+            request.model.clone(),
+            thinking_requested,
+        )
+        .await;
     });
 }
 

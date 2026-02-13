@@ -5,20 +5,23 @@ use uuid::Uuid;
 
 use crate::conversion::stream::helpers::{
     StreamChoice, ToolCallDelta, content_delta, first_choice, parse_stream_chunk,
-    snapshot_json_state, thinking_delta, thinking_signature_delta, tool_arguments_delta,
-    tool_call_deltas, tool_call_index, tool_started, update_finish_reason, update_tool_identity,
-    update_usage,
+    snapshot_json_state, tool_arguments_delta, tool_call_deltas, tool_call_index, tool_started,
+    update_finish_reason, update_tool_identity, update_usage,
 };
 use crate::conversion::stream::sse::{
-    send_error_sse, send_signature_delta, send_start_sequence, send_stop_sequence, send_text_delta,
-    send_thinking_block_start, send_thinking_delta, send_tool_block_start, send_tool_json_delta,
+    send_error_sse, send_start_sequence, send_stop_sequence, send_text_delta, send_tool_block_start,
+    send_tool_json_delta,
 };
 use crate::conversion::stream::state::StreamState;
+use crate::conversion::stream::thinking::{
+    ThinkingFallbackContext, handle_thinking_delta, maybe_emit_realtime_fallback,
+};
 
 pub async fn stream_openai_to_claude_sse(
     upstream_response: reqwest::Response,
     mut sender: BodySender,
     original_model: String,
+    thinking_requested: bool,
 ) {
     let message_id = message_id();
     if send_start_sequence(&mut sender, &original_model, &message_id)
@@ -28,7 +31,7 @@ pub async fn stream_openai_to_claude_sse(
         return;
     }
 
-    let mut state = StreamState::new();
+    let mut state = StreamState::new(thinking_requested);
     let mut line_buffer = String::new();
     let mut upstream_stream = upstream_response.bytes_stream();
 
@@ -46,7 +49,14 @@ pub async fn stream_openai_to_claude_sse(
         };
 
         line_buffer.push_str(&String::from_utf8_lossy(&chunk));
-        process_complete_lines(&mut line_buffer, &mut sender, &mut state).await;
+        process_complete_lines(
+            &mut line_buffer,
+            &mut sender,
+            &mut state,
+            &original_model,
+            &message_id,
+        )
+        .await;
 
         if line_buffer.contains("data: [DONE]") {
             break;
@@ -87,7 +97,14 @@ async fn process_complete_lines(
     line_buffer: &mut String,
     sender: &mut BodySender,
     state: &mut StreamState,
+    original_model: &str,
+    message_id: &str,
 ) {
+    let fallback_context = ThinkingFallbackContext {
+        model: original_model,
+        message_id,
+    };
+
     while let Some(newline_index) = line_buffer.find('\n') {
         let line: String = line_buffer.drain(..=newline_index).collect();
         let line = line.trim_end_matches(['\r', '\n']);
@@ -112,10 +129,17 @@ async fn process_complete_lines(
             continue;
         };
 
-        if handle_content_delta(choice, sender, state).await.is_err() {
+        if maybe_emit_realtime_fallback(choice, sender, state, &fallback_context)
+            .await
+            .is_err()
+        {
             return;
         }
+
         if handle_thinking_delta(choice, sender, state).await.is_err() {
+            return;
+        }
+        if handle_content_delta(choice, sender, state).await.is_err() {
             return;
         }
         if process_tool_deltas(choice, sender, state).await.is_err() {
@@ -123,62 +147,6 @@ async fn process_complete_lines(
         }
         update_finish_reason(choice, state);
     }
-}
-
-async fn handle_thinking_delta(
-    choice: &StreamChoice,
-    sender: &mut BodySender,
-    state: &mut StreamState,
-) -> std::io::Result<()> {
-    maybe_start_thinking_block(choice, sender, state).await?;
-    maybe_send_thinking_delta(choice, sender, state).await?;
-    maybe_send_signature_delta(choice, sender, state).await
-}
-
-async fn maybe_start_thinking_block(
-    choice: &StreamChoice,
-    sender: &mut BodySender,
-    state: &mut StreamState,
-) -> std::io::Result<()> {
-    if state.thinking_started || thinking_delta(choice).is_none() {
-        return Ok(());
-    }
-
-    state.tool_block_counter += 1;
-    let claude_index = state.text_block_index + state.tool_block_counter;
-    state.thinking_block_index = Some(claude_index);
-    state.thinking_started = true;
-    send_thinking_block_start(sender, claude_index).await
-}
-
-async fn maybe_send_thinking_delta(
-    choice: &StreamChoice,
-    sender: &mut BodySender,
-    state: &StreamState,
-) -> std::io::Result<()> {
-    let Some(claude_index) = state.thinking_block_index else {
-        return Ok(());
-    };
-    let Some(payload) = thinking_delta(choice) else {
-        return Ok(());
-    };
-
-    send_thinking_delta(sender, claude_index, payload).await
-}
-
-async fn maybe_send_signature_delta(
-    choice: &StreamChoice,
-    sender: &mut BodySender,
-    state: &StreamState,
-) -> std::io::Result<()> {
-    let Some(claude_index) = state.thinking_block_index else {
-        return Ok(());
-    };
-    let Some(payload) = thinking_signature_delta(choice) else {
-        return Ok(());
-    };
-
-    send_signature_delta(sender, claude_index, payload).await
 }
 
 async fn handle_content_delta(

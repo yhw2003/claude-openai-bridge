@@ -126,6 +126,9 @@ ANTHROPIC_BASE_URL=http://localhost:8082 ANTHROPIC_API_KEY="any-value" claude
   - `message_delta`
   - `message_stop`
   - `ping`
+- `thinking` 兼容转换：支持从上游增量中的 `reasoning_content` / `reasoning` 及常见对象形态提取思考内容，并映射为 Claude `thinking_delta`
+- 若下游请求开启 thinking，但上游未返回 reasoning 增量，代理会在流式过程中尽早发送一个空的 `thinking` block（仅状态，不伪造思考文本），避免 Claude 侧完全不显示 thinking 状态
+- 触发上述 thinking 兜底时会输出 `INFO` 级日志（`phase=thinking_fallback_start`），包含模型、message_id、索引、stop_reason 与工具调用上下文
 - 工具调用参数会累积到完整 JSON 后再发送 `input_json_delta`
 
 ## 诊断接口

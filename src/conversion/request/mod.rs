@@ -6,6 +6,7 @@ mod tools;
 mod user;
 
 pub use models::{OpenAiChatRequest, OpenAiMessage, OpenAiUserMessage};
+pub use tools::is_thinking_requested;
 
 use std::collections::HashSet;
 
