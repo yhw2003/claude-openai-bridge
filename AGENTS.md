@@ -12,6 +12,7 @@ These rules apply to AI coding agents working in this repository.
   - `cargo check`
   - `cargo test`
   - `cargo clippy --all-targets --all-features`
+  - `cargo fmt`
 - If any command fails or produces warnings, fix them before final delivery.
 
 ## Change Principles
