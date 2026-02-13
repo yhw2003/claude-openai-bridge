@@ -4,13 +4,14 @@ use tracing::{error, warn};
 use uuid::Uuid;
 
 use crate::conversion::stream::helpers::{
-    StreamChoice, ToolCallDelta, content_delta, first_choice, parse_stream_chunk, snapshot_json_state,
-    tool_arguments_delta, tool_call_deltas, tool_call_index, tool_started, update_finish_reason,
-    update_tool_identity, update_usage,
+    StreamChoice, ToolCallDelta, content_delta, first_choice, parse_stream_chunk,
+    snapshot_json_state, thinking_delta, thinking_signature_delta, tool_arguments_delta,
+    tool_call_deltas, tool_call_index, tool_started, update_finish_reason, update_tool_identity,
+    update_usage,
 };
 use crate::conversion::stream::sse::{
-    send_error_sse, send_start_sequence, send_stop_sequence, send_text_delta,
-    send_tool_block_start, send_tool_json_delta,
+    send_error_sse, send_signature_delta, send_start_sequence, send_stop_sequence, send_text_delta,
+    send_thinking_block_start, send_thinking_delta, send_tool_block_start, send_tool_json_delta,
 };
 use crate::conversion::stream::state::StreamState;
 
@@ -114,11 +115,70 @@ async fn process_complete_lines(
         if handle_content_delta(choice, sender, state).await.is_err() {
             return;
         }
+        if handle_thinking_delta(choice, sender, state).await.is_err() {
+            return;
+        }
         if process_tool_deltas(choice, sender, state).await.is_err() {
             return;
         }
         update_finish_reason(choice, state);
     }
+}
+
+async fn handle_thinking_delta(
+    choice: &StreamChoice,
+    sender: &mut BodySender,
+    state: &mut StreamState,
+) -> std::io::Result<()> {
+    maybe_start_thinking_block(choice, sender, state).await?;
+    maybe_send_thinking_delta(choice, sender, state).await?;
+    maybe_send_signature_delta(choice, sender, state).await
+}
+
+async fn maybe_start_thinking_block(
+    choice: &StreamChoice,
+    sender: &mut BodySender,
+    state: &mut StreamState,
+) -> std::io::Result<()> {
+    if state.thinking_started || thinking_delta(choice).is_none() {
+        return Ok(());
+    }
+
+    state.tool_block_counter += 1;
+    let claude_index = state.text_block_index + state.tool_block_counter;
+    state.thinking_block_index = Some(claude_index);
+    state.thinking_started = true;
+    send_thinking_block_start(sender, claude_index).await
+}
+
+async fn maybe_send_thinking_delta(
+    choice: &StreamChoice,
+    sender: &mut BodySender,
+    state: &StreamState,
+) -> std::io::Result<()> {
+    let Some(claude_index) = state.thinking_block_index else {
+        return Ok(());
+    };
+    let Some(payload) = thinking_delta(choice) else {
+        return Ok(());
+    };
+
+    send_thinking_delta(sender, claude_index, payload).await
+}
+
+async fn maybe_send_signature_delta(
+    choice: &StreamChoice,
+    sender: &mut BodySender,
+    state: &StreamState,
+) -> std::io::Result<()> {
+    let Some(claude_index) = state.thinking_block_index else {
+        return Ok(());
+    };
+    let Some(payload) = thinking_signature_delta(choice) else {
+        return Ok(());
+    };
+
+    send_signature_delta(sender, claude_index, payload).await
 }
 
 async fn handle_content_delta(

@@ -4,7 +4,7 @@ use serde::Serialize;
 
 use crate::models::StreamingToolCallState;
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Default)]
 pub struct StreamUsage {
     pub input_tokens: u64,
     pub output_tokens: u64,
@@ -12,18 +12,10 @@ pub struct StreamUsage {
     pub cache_read_input_tokens: Option<u64>,
 }
 
-impl Default for StreamUsage {
-    fn default() -> Self {
-        Self {
-            input_tokens: 0,
-            output_tokens: 0,
-            cache_read_input_tokens: None,
-        }
-    }
-}
-
 pub struct StreamState {
     pub text_block_index: usize,
+    pub thinking_block_index: Option<usize>,
+    pub thinking_started: bool,
     pub tool_block_counter: usize,
     pub tool_calls: BTreeMap<usize, StreamingToolCallState>,
     pub final_stop_reason: String,
@@ -34,6 +26,8 @@ impl StreamState {
     pub fn new() -> Self {
         Self {
             text_block_index: 0,
+            thinking_block_index: None,
+            thinking_started: false,
             tool_block_counter: 0,
             tool_calls: BTreeMap::new(),
             final_stop_reason: "end_turn".to_string(),

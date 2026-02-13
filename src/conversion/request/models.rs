@@ -47,6 +47,7 @@ pub enum OpenAiMessage {
 }
 
 impl OpenAiMessage {
+    #[allow(dead_code)]
     pub fn role(&self) -> &str {
         match self {
             Self::System(_) => ROLE_SYSTEM,

@@ -20,6 +20,11 @@ pub(crate) fn convert_openai_to_claude_response(
 
     let mut content_blocks = Vec::new();
     push_text_content(message.content.as_ref(), &mut content_blocks);
+    push_thinking_content(
+        message.thinking(),
+        message.signature.as_deref(),
+        &mut content_blocks,
+    );
     push_tool_use_content(&message.tool_calls, &mut content_blocks);
 
     ensure_non_empty_content(&mut content_blocks);
@@ -76,6 +81,24 @@ fn push_tool_use_content(
     }
 }
 
+fn push_thinking_content(
+    thinking: Option<&str>,
+    signature: Option<&str>,
+    content_blocks: &mut Vec<ClaudeContentBlock>,
+) {
+    let Some(thinking_text) = thinking else {
+        return;
+    };
+    if thinking_text.is_empty() {
+        return;
+    }
+
+    content_blocks.push(ClaudeContentBlock::Thinking {
+        thinking: thinking_text.to_string(),
+        signature: signature.unwrap_or_default().to_string(),
+    });
+}
+
 fn map_tool_call(tool_call: &OpenAiResponseToolCall) -> Option<ClaudeContentBlock> {
     if tool_call.kind.as_deref() != Some(TOOL_FUNCTION) {
         return None;
@@ -86,9 +109,12 @@ fn map_tool_call(tool_call: &OpenAiResponseToolCall) -> Option<ClaudeContentBloc
 
     let arguments_value = serde_json::from_str::<Value>(arguments_raw).unwrap_or_else(|_| {
         serde_json::Value::Object(
-            [("raw_arguments".to_string(), Value::String(arguments_raw.to_string()))]
-                .into_iter()
-                .collect(),
+            [(
+                "raw_arguments".to_string(),
+                Value::String(arguments_raw.to_string()),
+            )]
+            .into_iter()
+            .collect(),
         )
     });
 
@@ -183,8 +209,19 @@ struct OpenAiChoice {
 #[derive(Debug, Deserialize)]
 struct OpenAiResponseMessage {
     content: Option<OpenAiResponseContent>,
+    reasoning_content: Option<String>,
+    reasoning: Option<String>,
+    signature: Option<String>,
     #[serde(default)]
     tool_calls: Vec<OpenAiResponseToolCall>,
+}
+
+impl OpenAiResponseMessage {
+    fn thinking(&self) -> Option<&str> {
+        self.reasoning_content
+            .as_deref()
+            .or(self.reasoning.as_deref())
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -238,8 +275,14 @@ struct ClaudeUsage {
 enum ClaudeContentBlock {
     #[serde(rename = "text")]
     Text { text: String },
+    #[serde(rename = "thinking")]
+    Thinking { thinking: String, signature: String },
     #[serde(rename = "tool_use")]
-    ToolUse { id: String, name: String, input: Value },
+    ToolUse {
+        id: String,
+        name: String,
+        input: Value,
+    },
 }
 
 #[cfg(test)]
@@ -332,5 +375,34 @@ mod tests {
             tool_use.2.get("command").and_then(Value::as_str),
             Some("cargo fmt")
         );
+    }
+
+    #[test]
+    fn maps_reasoning_content_to_thinking_block() {
+        let openai_response = json!({
+            "id": "chatcmpl_test",
+            "choices": [{
+                "finish_reason": "stop",
+                "message": {
+                    "content": "done",
+                    "reasoning_content": "step by step",
+                    "signature": "sig_123",
+                    "tool_calls": []
+                }
+            }],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1}
+        });
+
+        let parsed: OpenAiChatResponse =
+            serde_json::from_value(openai_response).expect("response should deserialize");
+        let converted = convert_openai_to_claude_response(&parsed, &empty_request())
+            .expect("conversion should succeed");
+
+        assert_eq!(converted.content.len(), 2);
+        assert!(matches!(
+            &converted.content[1],
+            ClaudeContentBlock::Thinking { thinking, signature }
+            if thinking == "step by step" && signature == "sig_123"
+        ));
     }
 }

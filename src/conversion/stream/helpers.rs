@@ -1,5 +1,5 @@
-use serde::de::IgnoredAny;
 use serde::Deserialize;
+use serde::de::IgnoredAny;
 
 use crate::conversion::response::map_finish_reason;
 use crate::conversion::stream::state::{StreamState, StreamUsage};
@@ -70,11 +70,33 @@ pub fn tool_arguments_delta(tool_call_delta: &ToolCallDelta) -> Option<&str> {
 }
 
 pub fn content_delta(choice: &StreamChoice) -> Option<&str> {
-    choice.delta.as_ref().and_then(|delta| delta.content.as_deref())
+    choice
+        .delta
+        .as_ref()
+        .and_then(|delta| delta.content.as_deref())
+}
+
+pub fn thinking_delta(choice: &StreamChoice) -> Option<&str> {
+    choice.delta.as_ref().and_then(|delta| {
+        delta
+            .reasoning_content
+            .as_deref()
+            .or(delta.reasoning.as_deref())
+    })
+}
+
+pub fn thinking_signature_delta(choice: &StreamChoice) -> Option<&str> {
+    choice
+        .delta
+        .as_ref()
+        .and_then(|delta| delta.signature.as_deref())
 }
 
 pub fn tool_call_deltas(choice: &StreamChoice) -> Option<&Vec<ToolCallDelta>> {
-    choice.delta.as_ref().and_then(|delta| delta.tool_calls.as_ref())
+    choice
+        .delta
+        .as_ref()
+        .and_then(|delta| delta.tool_calls.as_ref())
 }
 
 pub fn tool_started(state: &StreamState, tool_call_index: usize) -> bool {
@@ -96,7 +118,8 @@ pub fn snapshot_json_state(
         .expect("tool call state should exist");
 
     tool_call_state.args_buffer.push_str(arguments_delta);
-    let has_complete_json = serde_json::from_str::<IgnoredAny>(&tool_call_state.args_buffer).is_ok();
+    let has_complete_json =
+        serde_json::from_str::<IgnoredAny>(&tool_call_state.args_buffer).is_ok();
 
     (
         tool_call_state.json_sent,
@@ -122,6 +145,9 @@ pub struct StreamChoice {
 #[derive(Debug, Deserialize)]
 pub struct StreamDelta {
     pub content: Option<String>,
+    pub reasoning_content: Option<String>,
+    pub reasoning: Option<String>,
+    pub signature: Option<String>,
     pub tool_calls: Option<Vec<ToolCallDelta>>,
 }
 
