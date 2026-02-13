@@ -1,0 +1,29 @@
+# 配置优先级
+# 1) 环境变量（最高）
+# 2) config.toml
+# 3) 代码默认值（最低）
+
+openai_api_key = "sk-your-openai-api-key"
+# anthropic_api_key = "your-client-api-key"
+
+openai_base_url = "https://api.openai.com/v1"
+# azure_api_version = "2024-10-21"
+
+host = "0.0.0.0"
+port = 8082
+log_level = "INFO"
+
+request_timeout = 90
+# stream_request_timeout = 120
+request_body_max_size = 16777216
+
+debug_tool_id_matching = false
+
+big_model = "gpt-4o"
+# middle_model 默认继承 big_model
+# middle_model = "gpt-4o"
+small_model = "gpt-4o-mini"
+
+[custom_headers]
+# X-Proxy-Env = "prod"
+# X-Team = "platform"

@@ -32,7 +32,7 @@ pub async fn run() {
 }
 
 fn load_config_or_exit() -> Config {
-    match Config::from_env() {
+    match Config::load() {
         Ok(config) => config,
         Err(error) => {
             eprintln!("Configuration Error: {error}");

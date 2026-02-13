@@ -1,5 +1,9 @@
 use std::collections::HashMap;
 use std::env;
+use std::fs;
+use std::path::Path;
+
+use serde::Deserialize;
 
 #[derive(Clone, Debug)]
 pub struct Config {
@@ -20,29 +24,111 @@ pub struct Config {
     pub custom_headers: HashMap<String, String>,
 }
 
+#[derive(Debug, Default, Deserialize)]
+struct TomlConfigRaw {
+    openai_api_key: Option<String>,
+    anthropic_api_key: Option<String>,
+    openai_base_url: Option<String>,
+    azure_api_version: Option<String>,
+    host: Option<String>,
+    port: Option<u16>,
+    log_level: Option<String>,
+    request_timeout: Option<u64>,
+    stream_request_timeout: Option<u64>,
+    request_body_max_size: Option<usize>,
+    debug_tool_id_matching: Option<bool>,
+    big_model: Option<String>,
+    middle_model: Option<String>,
+    small_model: Option<String>,
+    custom_headers: Option<HashMap<String, String>>,
+}
+
 impl Config {
-    pub fn from_env() -> Result<Self, String> {
+    pub fn load() -> Result<Self, String> {
+        let toml_config = read_toml_config("config.toml")?.unwrap_or_default();
+
         let openai_api_key = env::var("OPENAI_API_KEY")
-            .map_err(|_| "OPENAI_API_KEY not found in environment variables".to_string())?;
+            .ok()
+            .or(toml_config.openai_api_key)
+            .ok_or_else(|| {
+                "OPENAI_API_KEY not found in environment variables and config.toml".to_string()
+            })?;
+
+        let anthropic_api_key = env::var("ANTHROPIC_API_KEY")
+            .ok()
+            .or(toml_config.anthropic_api_key);
+
+        let openai_base_url = env::var("OPENAI_BASE_URL")
+            .ok()
+            .or(toml_config.openai_base_url)
+            .unwrap_or_else(|| "https://api.openai.com/v1".to_string());
+
+        let azure_api_version = env::var("AZURE_API_VERSION")
+            .ok()
+            .or(toml_config.azure_api_version);
+
+        let host = env::var("HOST")
+            .ok()
+            .or(toml_config.host)
+            .unwrap_or_else(|| "0.0.0.0".to_string());
+
+        let port = env_u16_with_fallback("PORT", toml_config.port.unwrap_or(8082));
+        let log_level = env::var("LOG_LEVEL")
+            .ok()
+            .or(toml_config.log_level)
+            .unwrap_or_else(|| "INFO".to_string());
+
+        let request_timeout =
+            env_u64_with_fallback("REQUEST_TIMEOUT", toml_config.request_timeout.unwrap_or(90));
+
+        let stream_request_timeout = env_optional_u64("STREAM_REQUEST_TIMEOUT")
+            .or(toml_config.stream_request_timeout)
+            .filter(|value| *value > 0);
+
+        let request_body_max_size = env_usize_with_fallback(
+            "REQUEST_BODY_MAX_SIZE",
+            toml_config.request_body_max_size.unwrap_or(16 * 1024 * 1024),
+        );
+
+        let debug_tool_id_matching = env_bool_with_fallback(
+            "DEBUG_TOOL_ID_MATCHING",
+            toml_config.debug_tool_id_matching.unwrap_or(false),
+        );
+
+        let big_model = env::var("BIG_MODEL")
+            .ok()
+            .or(toml_config.big_model)
+            .unwrap_or_else(|| "gpt-4o".to_string());
+
+        let middle_model = env::var("MIDDLE_MODEL")
+            .ok()
+            .or(toml_config.middle_model)
+            .unwrap_or_else(|| big_model.clone());
+
+        let small_model = env::var("SMALL_MODEL")
+            .ok()
+            .or(toml_config.small_model)
+            .unwrap_or_else(|| "gpt-4o-mini".to_string());
+
+        let mut custom_headers = toml_config.custom_headers.unwrap_or_default();
+        custom_headers.extend(collect_custom_headers());
 
         Ok(Self {
             openai_api_key,
-            anthropic_api_key: env::var("ANTHROPIC_API_KEY").ok(),
-            openai_base_url: env::var("OPENAI_BASE_URL")
-                .unwrap_or_else(|_| "https://api.openai.com/v1".to_string()),
-            azure_api_version: env::var("AZURE_API_VERSION").ok(),
-            host: env::var("HOST").unwrap_or_else(|_| "0.0.0.0".to_string()),
-            port: env_u16("PORT", 8082),
-            log_level: env::var("LOG_LEVEL").unwrap_or_else(|_| "INFO".to_string()),
-            request_timeout: env_u64("REQUEST_TIMEOUT", 90),
-            stream_request_timeout: env_optional_u64("STREAM_REQUEST_TIMEOUT"),
-            request_body_max_size: env_usize("REQUEST_BODY_MAX_SIZE", 16 * 1024 * 1024),
-            debug_tool_id_matching: env_bool("DEBUG_TOOL_ID_MATCHING", false),
-            big_model: env::var("BIG_MODEL").unwrap_or_else(|_| "gpt-4o".to_string()),
-            middle_model: env::var("MIDDLE_MODEL")
-                .unwrap_or_else(|_| env::var("BIG_MODEL").unwrap_or_else(|_| "gpt-4o".to_string())),
-            small_model: env::var("SMALL_MODEL").unwrap_or_else(|_| "gpt-4o-mini".to_string()),
-            custom_headers: collect_custom_headers(),
+            anthropic_api_key,
+            openai_base_url,
+            azure_api_version,
+            host,
+            port,
+            log_level,
+            request_timeout,
+            stream_request_timeout,
+            request_body_max_size,
+            debug_tool_id_matching,
+            big_model,
+            middle_model,
+            small_model,
+            custom_headers,
         })
     }
 
@@ -56,6 +142,22 @@ impl Config {
             None => true,
         }
     }
+}
+
+fn read_toml_config(path: &str) -> Result<Option<TomlConfigRaw>, String> {
+    let config_path = Path::new(path);
+
+    if !config_path.exists() {
+        return Ok(None);
+    }
+
+    let content = fs::read_to_string(config_path)
+        .map_err(|error| format!("Failed to read {}: {}", config_path.display(), error))?;
+
+    let parsed = toml::from_str::<TomlConfigRaw>(&content)
+        .map_err(|error| format!("Failed to parse {}: {}", config_path.display(), error))?;
+
+    Ok(Some(parsed))
 }
 
 fn collect_custom_headers() -> HashMap<String, String> {
@@ -72,18 +174,18 @@ fn collect_custom_headers() -> HashMap<String, String> {
     custom_headers
 }
 
-fn env_u16(key: &str, default: u16) -> u16 {
+fn env_u16_with_fallback(key: &str, fallback: u16) -> u16 {
     env::var(key)
         .ok()
         .and_then(|value| value.parse::<u16>().ok())
-        .unwrap_or(default)
+        .unwrap_or(fallback)
 }
 
-fn env_u64(key: &str, default: u64) -> u64 {
+fn env_u64_with_fallback(key: &str, fallback: u64) -> u64 {
     env::var(key)
         .ok()
         .and_then(|value| value.parse::<u64>().ok())
-        .unwrap_or(default)
+        .unwrap_or(fallback)
 }
 
 fn env_optional_u64(key: &str) -> Option<u64> {
@@ -93,7 +195,7 @@ fn env_optional_u64(key: &str) -> Option<u64> {
         .filter(|value| *value > 0)
 }
 
-fn env_bool(key: &str, default: bool) -> bool {
+fn env_bool_with_fallback(key: &str, fallback: bool) -> bool {
     env::var(key)
         .ok()
         .map(|value| {
@@ -102,12 +204,12 @@ fn env_bool(key: &str, default: bool) -> bool {
                 "1" | "true" | "yes" | "on"
             )
         })
-        .unwrap_or(default)
+        .unwrap_or(fallback)
 }
 
-fn env_usize(key: &str, default: usize) -> usize {
+fn env_usize_with_fallback(key: &str, fallback: usize) -> usize {
     env::var(key)
         .ok()
         .and_then(|value| value.parse::<usize>().ok())
-        .unwrap_or(default)
+        .unwrap_or(fallback)
 }
