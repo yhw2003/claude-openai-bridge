@@ -10,8 +10,9 @@ reqwest = { version = "0.12.12", default-features = false, features = ["json", "
 salvo = { version = "0.74.0", features = ["cors"] }
 serde = { version = "1.0.217", features = ["derive"] }
 serde_json = "1.0.135"
-tokio = { version = "1.43.0", features = ["macros", "rt-multi-thread"] }
+tokio = { version = "1.43.0", features = ["macros", "rt-multi-thread", "sync", "time"] }
 tracing = "0.1.41"
 tracing-subscriber = { version = "0.3.19", features = ["env-filter"] }
 toml = "0.8.20"
 uuid = { version = "1.12.1", features = ["v4"] }
+sha2 = "0.10.8"

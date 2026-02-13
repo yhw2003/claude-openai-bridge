@@ -23,6 +23,9 @@ pub struct Config {
     pub request_timeout: u64,
     pub stream_request_timeout: Option<u64>,
     pub request_body_max_size: usize,
+    pub session_ttl_min_secs: u64,
+    pub session_ttl_max_secs: u64,
+    pub session_cleanup_interval_secs: u64,
     pub debug_tool_id_matching: bool,
     pub wire_api: WireApi,
     pub big_model: String,
@@ -43,6 +46,9 @@ struct TomlConfigRaw {
     request_timeout: Option<u64>,
     stream_request_timeout: Option<u64>,
     request_body_max_size: Option<usize>,
+    session_ttl_min_secs: Option<u64>,
+    session_ttl_max_secs: Option<u64>,
+    session_cleanup_interval_secs: Option<u64>,
     debug_tool_id_matching: Option<bool>,
     wire_api: Option<String>,
     big_model: Option<String>,
@@ -100,6 +106,21 @@ impl Config {
                 .unwrap_or(16 * 1024 * 1024),
         );
 
+        let session_ttl_min_secs =
+            env_u64_with_fallback("SESSION_TTL_MIN_SECS", toml_config.session_ttl_min_secs.unwrap_or(1800));
+        let session_ttl_max_secs =
+            env_u64_with_fallback("SESSION_TTL_MAX_SECS", toml_config.session_ttl_max_secs.unwrap_or(86400));
+        let session_cleanup_interval_secs = env_u64_with_fallback(
+            "SESSION_CLEANUP_INTERVAL_SECS",
+            toml_config.session_cleanup_interval_secs.unwrap_or(60),
+        );
+
+        validate_session_config(
+            session_ttl_min_secs,
+            session_ttl_max_secs,
+            session_cleanup_interval_secs,
+        )?;
+
         let debug_tool_id_matching = env_bool_with_fallback(
             "DEBUG_TOOL_ID_MATCHING",
             toml_config.debug_tool_id_matching.unwrap_or(false),
@@ -137,6 +158,9 @@ impl Config {
             request_timeout,
             stream_request_timeout,
             request_body_max_size,
+            session_ttl_min_secs,
+            session_ttl_max_secs,
+            session_cleanup_interval_secs,
             debug_tool_id_matching,
             wire_api,
             big_model,
@@ -156,6 +180,20 @@ impl Config {
             None => true,
         }
     }
+}
+
+fn validate_session_config(min_secs: u64, max_secs: u64, cleanup_secs: u64) -> Result<(), String> {
+    if min_secs == 0 {
+        return Err("SESSION_TTL_MIN_SECS must be > 0".to_string());
+    }
+    if max_secs < min_secs {
+        return Err("SESSION_TTL_MAX_SECS must be >= SESSION_TTL_MIN_SECS".to_string());
+    }
+    if cleanup_secs == 0 {
+        return Err("SESSION_CLEANUP_INTERVAL_SECS must be > 0".to_string());
+    }
+
+    Ok(())
 }
 
 fn read_toml_config(path: &str) -> Result<Option<TomlConfigRaw>, String> {

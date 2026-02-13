@@ -100,6 +100,13 @@ impl OpenAiChatResponse {
     pub(crate) fn id(&self) -> Option<&str> {
         self.id.as_deref()
     }
+
+    pub(crate) fn total_tokens(&self) -> u64 {
+        self.usage
+            .as_ref()
+            .map(OpenAiUsage::total_tokens)
+            .unwrap_or(0)
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -143,6 +150,14 @@ struct OpenAiFunctionPayload {
 struct OpenAiUsage {
     prompt_tokens: Option<u64>,
     completion_tokens: Option<u64>,
+}
+
+impl OpenAiUsage {
+    fn total_tokens(&self) -> u64 {
+        self.prompt_tokens
+            .unwrap_or(0)
+            .saturating_add(self.completion_tokens.unwrap_or(0))
+    }
 }
 
 #[cfg(test)]

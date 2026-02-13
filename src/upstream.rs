@@ -22,17 +22,22 @@ impl UpstreamClient {
         let client = Client::builder()
             .build()
             .map_err(|error| format!("failed to initialize upstream HTTP client: {error}"))?;
-        Ok(Self { client, config })
+        Ok(Self {
+            client,
+            config,
+        })
     }
 
     pub async fn chat_completion<T: Serialize + ?Sized>(
         &self,
         body: &T,
+        session_id: &str,
     ) -> Result<OpenAiChatResponse, UpstreamError> {
         let response = self
             .send_request(
                 "/chat/completions",
                 body,
+                session_id,
                 Some(Duration::from_secs(self.config.request_timeout)),
                 "non_stream",
             )
@@ -51,20 +56,29 @@ impl UpstreamClient {
     pub async fn chat_completion_stream<T: Serialize + ?Sized>(
         &self,
         body: &T,
+        session_id: &str,
     ) -> Result<reqwest::Response, UpstreamError> {
         let stream_timeout = self.config.stream_request_timeout.map(Duration::from_secs);
-        self.send_request("/chat/completions", body, stream_timeout, "stream")
-            .await
+        self.send_request(
+            "/chat/completions",
+            body,
+            session_id,
+            stream_timeout,
+            "stream",
+        )
+        .await
     }
 
     pub async fn responses<T: Serialize + ?Sized>(
         &self,
         body: &T,
+        session_id: &str,
     ) -> Result<OpenAiResponsesResponse, UpstreamError> {
         let response = self
             .send_request(
                 "/responses",
                 body,
+                session_id,
                 Some(Duration::from_secs(self.config.request_timeout)),
                 "non_stream",
             )
@@ -84,9 +98,10 @@ impl UpstreamClient {
     pub async fn responses_stream<T: Serialize + ?Sized>(
         &self,
         body: &T,
+        session_id: &str,
     ) -> Result<reqwest::Response, UpstreamError> {
         let stream_timeout = self.config.stream_request_timeout.map(Duration::from_secs);
-        self.send_request("/responses", body, stream_timeout, "stream")
+        self.send_request("/responses", body, session_id, stream_timeout, "stream")
             .await
     }
 
@@ -94,6 +109,7 @@ impl UpstreamClient {
         &self,
         path: &str,
         body: &T,
+        session_id: &str,
         timeout: Option<Duration>,
         request_kind: &'static str,
     ) -> Result<reqwest::Response, UpstreamError> {
@@ -106,7 +122,7 @@ impl UpstreamClient {
         let mut request_builder = self
             .client
             .post(url)
-            .headers(build_upstream_headers(&self.config))
+            .headers(build_upstream_headers(&self.config, session_id))
             .json(body);
 
         if let Some(api_version) = self.config.azure_api_version.as_deref() {
@@ -176,7 +192,7 @@ fn log_send_stage_error(error: &reqwest::Error, timeout: Option<Duration>, reque
     );
 }
 
-fn build_upstream_headers(config: &Config) -> HeaderMap {
+fn build_upstream_headers(config: &Config, session_id: &str) -> HeaderMap {
     let mut headers = HeaderMap::new();
     headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
     headers.insert(
@@ -200,5 +216,67 @@ fn build_upstream_headers(config: &Config) -> HeaderMap {
         headers.insert(name, value);
     }
 
+    if let Ok(value) = HeaderValue::from_str(session_id) {
+        headers.insert("session_id", value);
+    }
+
     headers
+}
+
+#[cfg(test)]
+mod tests {
+    use super::build_upstream_headers;
+    use crate::config::{Config, WireApi};
+    use std::collections::HashMap;
+    use uuid::Uuid;
+
+    fn test_config() -> Config {
+        Config {
+            openai_api_key: "sk-test".to_string(),
+            anthropic_api_key: None,
+            openai_base_url: "https://api.openai.com/v1".to_string(),
+            azure_api_version: None,
+            host: "0.0.0.0".to_string(),
+            port: 8082,
+            log_level: "INFO".to_string(),
+            request_timeout: 90,
+            stream_request_timeout: None,
+            request_body_max_size: 16 * 1024 * 1024,
+            session_ttl_min_secs: 1800,
+            session_ttl_max_secs: 86400,
+            session_cleanup_interval_secs: 60,
+            debug_tool_id_matching: false,
+            wire_api: WireApi::Chat,
+            big_model: "gpt-4o".to_string(),
+            middle_model: "gpt-4o".to_string(),
+            small_model: "gpt-4o-mini".to_string(),
+            custom_headers: HashMap::new(),
+        }
+    }
+
+    #[test]
+    fn adds_session_id_header() {
+        let session_id = Uuid::new_v4().to_string();
+        let headers = build_upstream_headers(&test_config(), &session_id);
+
+        let value = headers
+            .get("session_id")
+            .and_then(|raw| raw.to_str().ok())
+            .expect("session_id header should exist");
+
+        assert_eq!(value, session_id);
+    }
+
+    #[test]
+    fn session_id_header_contains_valid_uuid() {
+        let session_id = Uuid::new_v4().to_string();
+        let headers = build_upstream_headers(&test_config(), &session_id);
+
+        let value = headers
+            .get("session_id")
+            .and_then(|raw| raw.to_str().ok())
+            .expect("session_id header should exist");
+
+        assert!(Uuid::parse_str(value).is_ok());
+    }
 }

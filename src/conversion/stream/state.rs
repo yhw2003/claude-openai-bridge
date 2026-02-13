@@ -12,6 +12,12 @@ pub struct StreamUsage {
     pub cache_read_input_tokens: Option<u64>,
 }
 
+impl StreamUsage {
+    pub fn total_tokens(&self) -> u64 {
+        self.input_tokens.saturating_add(self.output_tokens)
+    }
+}
+
 pub struct StreamState {
     pub text_block_index: usize,
     pub thinking_block_index: Option<usize>,

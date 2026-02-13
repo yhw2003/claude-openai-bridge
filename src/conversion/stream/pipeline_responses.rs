@@ -15,23 +15,23 @@ use crate::conversion::stream::sse::{
     send_error_sse, send_start_sequence, send_stop_sequence, send_text_delta,
     send_thinking_block_start, send_thinking_delta,
 };
-use crate::conversion::stream::state::StreamState;
+use crate::conversion::stream::state::{StreamState, StreamUsage};
 
 pub async fn stream_openai_responses_to_claude_sse(
     upstream_response: reqwest::Response,
     mut sender: BodySender,
     original_model: String,
     thinking_requested: bool,
-) {
+) -> StreamUsage {
+    let mut state = StreamState::new(thinking_requested);
     let message_id = message_id();
     if send_start_sequence(&mut sender, &original_model, &message_id)
         .await
         .is_err()
     {
-        return;
+        return state.usage_data;
     }
 
-    let mut state = StreamState::new(thinking_requested);
     let mut context = ResponsesStreamContext::default();
     let mut line_buffer = String::new();
     let mut upstream_stream = upstream_response.bytes_stream();
@@ -46,7 +46,7 @@ pub async fn stream_openai_responses_to_claude_sse(
                 )
                 .await;
             }
-            return;
+            return state.usage_data;
         };
 
         line_buffer.push_str(&String::from_utf8_lossy(&chunk));
@@ -65,6 +65,7 @@ pub async fn stream_openai_responses_to_claude_sse(
     }
 
     let _ = send_stop_sequence(&mut sender, &state).await;
+    state.usage_data
 }
 
 fn log_stream_read_error(error: &reqwest::Error) {

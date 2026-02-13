@@ -196,12 +196,27 @@ impl OpenAiResponsesResponse {
     pub(crate) fn id(&self) -> Option<&str> {
         self.id.as_deref()
     }
+
+    pub(crate) fn total_tokens(&self) -> u64 {
+        self.usage
+            .as_ref()
+            .map(OpenAiResponsesUsage::total_tokens)
+            .unwrap_or(0)
+    }
 }
 
 #[derive(Debug, Deserialize)]
 struct OpenAiResponsesUsage {
     input_tokens: Option<u64>,
     output_tokens: Option<u64>,
+}
+
+impl OpenAiResponsesUsage {
+    fn total_tokens(&self) -> u64 {
+        self.input_tokens
+            .unwrap_or(0)
+            .saturating_add(self.output_tokens.unwrap_or(0))
+    }
 }
 
 #[cfg(test)]

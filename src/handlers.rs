@@ -3,6 +3,8 @@ use salvo::prelude::*;
 use serde::de::{Deserializer, IgnoredAny};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
+use std::net::{IpAddr, SocketAddr as StdSocketAddr};
 use tracing::{debug, error, trace};
 
 use crate::config::WireApi;
@@ -35,10 +37,13 @@ pub fn router() -> Router {
 #[handler]
 pub async fn create_message(req: &mut Request, res: &mut Response) {
     let state = app_state();
-    if let Err(message) = validate_client_api_key_header(req) {
-        unauthorized(res, &message);
-        return;
-    }
+    let client_auth = match validate_client_api_key_header(req) {
+        Ok(value) => value,
+        Err(message) => {
+            unauthorized(res, &message);
+            return;
+        }
+    };
 
     let request = match parse_messages_request(req, res).await {
         Some(value) => value,
@@ -60,14 +65,35 @@ pub async fn create_message(req: &mut Request, res: &mut Response) {
         has_system = request.system.is_some(),
         has_tools = request.tools.as_ref().map(|v| !v.is_empty()).unwrap_or(false),
         has_tool_choice = request.tool_choice.is_some(),
+        has_device_tag = client_auth.device_tag.is_some(),
         "Received downstream request (summary)"
     );
 
+    let identity_key = build_identity_key(req, &client_auth);
+    let session_id = state.sessions.resolve_session_id(&identity_key).await;
     let thinking_requested = is_thinking_requested(request.thinking.as_ref());
 
     match state.config.wire_api {
-        WireApi::Chat => handle_chat_message(res, request, thinking_requested).await,
-        WireApi::Responses => handle_responses_message(res, request, thinking_requested).await,
+        WireApi::Chat => {
+            handle_chat_message(
+                res,
+                request,
+                thinking_requested,
+                &identity_key,
+                &session_id,
+            )
+            .await
+        }
+        WireApi::Responses => {
+            handle_responses_message(
+                res,
+                request,
+                thinking_requested,
+                &identity_key,
+                &session_id,
+            )
+            .await
+        }
     }
 }
 
@@ -202,22 +228,41 @@ async fn handle_chat_message(
     res: &mut Response,
     request: ClaudeMessagesRequest,
     thinking_requested: bool,
+    identity_key: &str,
+    session_id: &str,
 ) {
     let state = app_state();
     let mut openai_request = convert_claude_to_openai(&request, &state.config);
 
     if request.stream.unwrap_or(false) {
-        handle_chat_streaming_request(res, request, &mut openai_request, thinking_requested).await;
+        handle_chat_streaming_request(
+            res,
+            request,
+            &mut openai_request,
+            thinking_requested,
+            identity_key,
+            session_id,
+        )
+        .await;
         return;
     }
 
-    let openai_response = match state.upstream.chat_completion(&openai_request).await {
+    let openai_response = match state
+        .upstream
+        .chat_completion(&openai_request, session_id)
+        .await
+    {
         Ok(value) => value,
         Err(error) => {
             upstream_failed(res, error.status, &error.message);
             return;
         }
     };
+
+    state
+        .sessions
+        .add_usage(identity_key, openai_response.total_tokens())
+        .await;
 
     match convert_openai_to_claude_response(&openai_response, &request) {
         Ok(value) => res.render(Json(value)),
@@ -229,6 +274,8 @@ async fn handle_responses_message(
     res: &mut Response,
     request: ClaudeMessagesRequest,
     thinking_requested: bool,
+    identity_key: &str,
+    session_id: &str,
 ) {
     let state = app_state();
     let mut responses_request = convert_claude_to_responses(&request, &state.config);
@@ -239,18 +286,25 @@ async fn handle_responses_message(
             request,
             &mut responses_request,
             thinking_requested,
+            identity_key,
+            session_id,
         )
         .await;
         return;
     }
 
-    let upstream_response = match state.upstream.responses(&responses_request).await {
+    let upstream_response = match state.upstream.responses(&responses_request, session_id).await {
         Ok(value) => value,
         Err(error) => {
             upstream_failed(res, error.status, &error.message);
             return;
         }
     };
+
+    state
+        .sessions
+        .add_usage(identity_key, upstream_response.total_tokens())
+        .await;
 
     match convert_openai_responses_to_claude_response(&upstream_response, &request) {
         Ok(value) => res.render(Json(value)),
@@ -263,11 +317,13 @@ async fn handle_chat_streaming_request(
     request: ClaudeMessagesRequest,
     openai_request: &mut OpenAiChatRequest,
     thinking_requested: bool,
+    identity_key: &str,
+    session_id: &str,
 ) {
     openai_request.enable_stream_usage();
     let upstream_response = match app_state()
         .upstream
-        .chat_completion_stream(openai_request)
+        .chat_completion_stream(openai_request, session_id)
         .await
     {
         Ok(value) => value,
@@ -279,14 +335,13 @@ async fn handle_chat_streaming_request(
 
     set_sse_headers(res);
     let sender = res.channel();
+    let model = request.model.clone();
+    let sessions = app_state().sessions.clone();
+    let identity_key = identity_key.to_string();
     tokio::spawn(async move {
-        stream_openai_to_claude_sse(
-            upstream_response,
-            sender,
-            request.model.clone(),
-            thinking_requested,
-        )
-        .await;
+        let usage =
+            stream_openai_to_claude_sse(upstream_response, sender, model, thinking_requested).await;
+        sessions.add_usage(&identity_key, usage.total_tokens()).await;
     });
 }
 
@@ -295,11 +350,13 @@ async fn handle_responses_streaming_request(
     request: ClaudeMessagesRequest,
     responses_request: &mut OpenAiResponsesRequest,
     thinking_requested: bool,
+    identity_key: &str,
+    session_id: &str,
 ) {
     responses_request.enable_stream();
     let upstream_response = match app_state()
         .upstream
-        .responses_stream(responses_request)
+        .responses_stream(responses_request, session_id)
         .await
     {
         Ok(value) => value,
@@ -311,14 +368,18 @@ async fn handle_responses_streaming_request(
 
     set_sse_headers(res);
     let sender = res.channel();
+    let model = request.model.clone();
+    let sessions = app_state().sessions.clone();
+    let identity_key = identity_key.to_string();
     tokio::spawn(async move {
-        stream_openai_responses_to_claude_sse(
+        let usage = stream_openai_responses_to_claude_sse(
             upstream_response,
             sender,
-            request.model.clone(),
+            model,
             thinking_requested,
         )
         .await;
+        sessions.add_usage(&identity_key, usage.total_tokens()).await;
     });
 }
 
@@ -362,7 +423,10 @@ async fn run_chat_connection_test(
         tool_choice: None,
     };
 
-    let response = state.upstream.chat_completion(&test_request).await?;
+    let response = state
+        .upstream
+        .chat_completion(&test_request, "connection-test")
+        .await?;
     Ok(response.id().unwrap_or("unknown").to_string())
 }
 
@@ -376,7 +440,10 @@ async fn run_responses_connection_test(
         "stream": false
     });
 
-    let response = state.upstream.responses(&test_request).await?;
+    let response = state
+        .upstream
+        .responses(&test_request, "connection-test")
+        .await?;
     Ok(response.id().unwrap_or("unknown").to_string())
 }
 
@@ -387,30 +454,158 @@ fn wire_api_name(wire_api: &WireApi) -> String {
     }
 }
 
-fn validate_client_api_key_header(req: &Request) -> Result<(), String> {
-    let config = &app_state().config;
-    if config.anthropic_api_key.is_none() {
-        return Ok(());
+#[derive(Debug, Clone, Default)]
+struct ClientAuth {
+    base_key: Option<String>,
+    device_tag: Option<String>,
+}
+
+fn build_identity_key(req: &Request, client_auth: &ClientAuth) -> String {
+    let ip_component = resolve_client_ip(req)
+        .map(|ip| ip.to_string())
+        .unwrap_or_else(|| "unknown".to_string());
+    let key_component = client_auth.base_key.as_deref().unwrap_or("anonymous");
+    let device_component = client_auth.device_tag.as_deref().unwrap_or("-");
+
+    let identity_source = format!("{ip_component}|{key_component}|{device_component}");
+    let mut hasher = Sha256::new();
+    hasher.update(identity_source.as_bytes());
+    format!("{:x}", hasher.finalize())
+}
+
+fn resolve_client_ip(req: &Request) -> Option<IpAddr> {
+    forwarded_ip(req).or_else(|| remote_peer_ip(req))
+}
+
+fn forwarded_ip(req: &Request) -> Option<IpAddr> {
+    for header_name in ["x-forwarded-for", "x-real-ip"] {
+        let Some(raw_value) = req
+            .headers()
+            .get(header_name)
+            .and_then(|value| value.to_str().ok())
+        else {
+            continue;
+        };
+
+        if let Some(ip) = parse_ip_from_header(raw_value) {
+            return Some(ip);
+        }
     }
 
-    let x_api_key = req
-        .headers()
-        .get("x-api-key")
-        .and_then(|value| value.to_str().ok());
+    None
+}
 
-    let authorization = req
-        .headers()
-        .get("authorization")
-        .and_then(|value| value.to_str().ok());
+fn parse_ip_from_header(raw_value: &str) -> Option<IpAddr> {
+    raw_value.split(',').find_map(|segment| {
+        let candidate = segment.trim().trim_matches('"');
+        parse_ip_candidate(candidate)
+    })
+}
 
-    let provided_key = x_api_key
-        .or_else(|| authorization.and_then(|auth_header| auth_header.strip_prefix("Bearer ")));
+fn parse_ip_candidate(candidate: &str) -> Option<IpAddr> {
+    if candidate.is_empty() || candidate.eq_ignore_ascii_case("unknown") {
+        return None;
+    }
 
-    if config.validate_client_api_key(provided_key) {
-        Ok(())
+    if let Ok(ip) = candidate.parse::<IpAddr>() {
+        return Some(ip);
+    }
+
+    if let Ok(addr) = candidate.parse::<StdSocketAddr>() {
+        return Some(addr.ip());
+    }
+
+    None
+}
+
+fn remote_peer_ip(req: &Request) -> Option<IpAddr> {
+    if let Some(addr) = req.remote_addr().as_ipv4() {
+        return Some(IpAddr::V4(*addr.ip()));
+    }
+    if let Some(addr) = req.remote_addr().as_ipv6() {
+        return Some(IpAddr::V6(*addr.ip()));
+    }
+    None
+}
+
+fn validate_client_api_key_header(req: &Request) -> Result<ClientAuth, String> {
+    let config = &app_state().config;
+    let client_auth = extract_client_auth(req);
+
+    if config.anthropic_api_key.is_none() {
+        return Ok(client_auth.unwrap_or_default());
+    }
+
+    let Some(client_auth) = client_auth else {
+        return Err("Invalid API key. Please provide a valid Anthropic API key.".to_string());
+    };
+
+    if config.validate_client_api_key(client_auth.base_key.as_deref()) {
+        Ok(client_auth)
     } else {
         Err("Invalid API key. Please provide a valid Anthropic API key.".to_string())
     }
+}
+
+fn extract_client_auth(req: &Request) -> Option<ClientAuth> {
+    let raw_key = extract_raw_client_key(req)?;
+    parse_client_auth(raw_key)
+}
+
+fn extract_raw_client_key<'a>(req: &'a Request) -> Option<&'a str> {
+    let x_api_key = req
+        .headers()
+        .get("x-api-key")
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+
+    if x_api_key.is_some() {
+        return x_api_key;
+    }
+
+    req.headers()
+        .get("authorization")
+        .and_then(|value| value.to_str().ok())
+        .and_then(parse_bearer_token)
+}
+
+fn parse_bearer_token(authorization: &str) -> Option<&str> {
+    let (scheme, token) = authorization.trim().split_once(' ')?;
+    if !scheme.eq_ignore_ascii_case("bearer") {
+        return None;
+    }
+    let token = token.trim();
+    if token.is_empty() {
+        None
+    } else {
+        Some(token)
+    }
+}
+
+fn parse_client_auth(raw_key: &str) -> Option<ClientAuth> {
+    let normalized = raw_key.trim();
+    if normalized.is_empty() {
+        return None;
+    }
+
+    let (base_key_raw, device_tag_raw) = match normalized.split_once('|') {
+        Some((base_key, device_tag)) => (base_key, Some(device_tag)),
+        None => (normalized, None),
+    };
+
+    let base_key = base_key_raw.trim();
+    if base_key.is_empty() {
+        return None;
+    }
+
+    Some(ClientAuth {
+        base_key: Some(base_key.to_string()),
+        device_tag: device_tag_raw
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(|value| value.to_string()),
+    })
 }
 
 fn estimate_input_tokens(token_request: &ClaudeTokenCountRequest) -> usize {
@@ -621,5 +816,53 @@ impl LooseString {
             Self::String(value) => Some(value),
             Self::Other(_) => None,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{parse_bearer_token, parse_client_auth, parse_ip_candidate, parse_ip_from_header};
+    use std::net::{IpAddr, Ipv4Addr};
+
+    #[test]
+    fn parses_plain_client_key() {
+        let auth = parse_client_auth("sk-ant-test").expect("client auth");
+        assert_eq!(auth.base_key.as_deref(), Some("sk-ant-test"));
+        assert_eq!(auth.device_tag.as_deref(), None);
+    }
+
+    #[test]
+    fn parses_client_key_with_device_suffix() {
+        let auth = parse_client_auth("sk-ant-test|device_001").expect("client auth");
+        assert_eq!(auth.base_key.as_deref(), Some("sk-ant-test"));
+        assert_eq!(auth.device_tag.as_deref(), Some("device_001"));
+    }
+
+    #[test]
+    fn rejects_client_key_with_empty_base() {
+        assert!(parse_client_auth("|device_001").is_none());
+        assert!(parse_client_auth("   ").is_none());
+    }
+
+    #[test]
+    fn parses_bearer_token_case_insensitively() {
+        assert_eq!(parse_bearer_token("Bearer abc"), Some("abc"));
+        assert_eq!(parse_bearer_token("bearer abc"), Some("abc"));
+        assert_eq!(parse_bearer_token("Basic abc"), None);
+    }
+
+    #[test]
+    fn parses_first_valid_ip_from_forwarded_header() {
+        let ip = parse_ip_from_header("unknown, 203.0.113.7, 198.51.100.9").expect("ip");
+        assert_eq!(ip, IpAddr::V4(Ipv4Addr::new(203, 0, 113, 7)));
+    }
+
+    #[test]
+    fn parses_ip_candidates() {
+        let ipv4 = parse_ip_candidate("192.168.1.9").expect("ipv4");
+        assert_eq!(ipv4, IpAddr::V4(Ipv4Addr::new(192, 168, 1, 9)));
+
+        let socket_ipv4 = parse_ip_candidate("10.0.0.5:8080").expect("socket ipv4");
+        assert_eq!(socket_ipv4, IpAddr::V4(Ipv4Addr::new(10, 0, 0, 5)));
     }
 }
