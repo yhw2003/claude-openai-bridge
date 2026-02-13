@@ -4,9 +4,6 @@ pub const ROLE_SYSTEM: &str = "system";
 pub const ROLE_TOOL: &str = "tool";
 
 pub const CONTENT_TEXT: &str = "text";
-pub const CONTENT_IMAGE: &str = "image";
-pub const CONTENT_TOOL_USE: &str = "tool_use";
-pub const CONTENT_TOOL_RESULT: &str = "tool_result";
 
 pub const TOOL_FUNCTION: &str = "function";
 

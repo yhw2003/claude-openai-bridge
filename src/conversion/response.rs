@@ -86,9 +86,12 @@ fn map_tool_call(tool_call: &OpenAiResponseToolCall) -> Option<ClaudeContentBloc
 
     let arguments_value = serde_json::from_str::<Value>(arguments_raw).unwrap_or_else(|_| {
         serde_json::Value::Object(
-            [("raw_arguments".to_string(), Value::String(arguments_raw.to_string()))]
-                .into_iter()
-                .collect(),
+            [(
+                "raw_arguments".to_string(),
+                Value::String(arguments_raw.to_string()),
+            )]
+            .into_iter()
+            .collect(),
         )
     });
 
@@ -239,7 +242,11 @@ enum ClaudeContentBlock {
     #[serde(rename = "text")]
     Text { text: String },
     #[serde(rename = "tool_use")]
-    ToolUse { id: String, name: String, input: Value },
+    ToolUse {
+        id: String,
+        name: String,
+        input: Value,
+    },
 }
 
 #[cfg(test)]
@@ -252,6 +259,7 @@ mod tests {
             model: "claude-3-5-sonnet-20241022".to_string(),
             max_tokens: 256,
             messages: vec![],
+            thinking: None,
             system: None,
             stop_sequences: None,
             stream: Some(false),

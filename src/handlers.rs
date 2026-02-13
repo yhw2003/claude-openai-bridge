@@ -143,6 +143,7 @@ pub async fn test_connection(res: &mut Response) {
         ))],
         max_tokens: 5,
         temperature: 1.0,
+        reasoning_effort: None,
         stream: false,
         stream_options: None,
         stop: None,
@@ -348,7 +349,10 @@ fn count_text_chars_in_value(value: &Value) -> usize {
         Value::Object(_) => serde_json::from_value::<LooseTextCarrier>(value.clone())
             .ok()
             .and_then(|payload| payload.text)
-            .map_or_else(|| count_text_chars_in_object_values(value), |text| text.len()),
+            .map_or_else(
+                || count_text_chars_in_object_values(value),
+                |text| text.len(),
+            ),
         _ => 0,
     }
 }

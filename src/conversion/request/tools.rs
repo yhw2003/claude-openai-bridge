@@ -4,8 +4,9 @@ use serde_json::{Map, Value};
 use crate::constants::TOOL_FUNCTION;
 use crate::conversion::request::models::{
     OpenAiChatRequest, OpenAiFunctionDefinition, OpenAiToolChoice, OpenAiToolDefinition,
+    supports_reasoning_effort,
 };
-use crate::models::{ClaudeMessagesRequest, ClaudeToolChoice};
+use crate::models::{ClaudeMessagesRequest, ClaudeThinking, ClaudeToolChoice};
 
 pub fn add_optional_request_fields(
     request: &ClaudeMessagesRequest,
@@ -16,6 +17,93 @@ pub fn add_optional_request_fields(
     }
     if let Some(top_p) = request.top_p {
         openai_request.top_p = Some(top_p);
+    }
+
+    openai_request.reasoning_effort = derive_reasoning_effort(
+        request.thinking.as_ref(),
+        request.max_tokens,
+        &openai_request.model,
+    );
+}
+
+pub fn derive_reasoning_effort(
+    thinking: Option<&ClaudeThinking>,
+    max_tokens: u32,
+    upstream_model: &str,
+) -> Option<String> {
+    if !supports_reasoning_effort(upstream_model) {
+        return None;
+    }
+
+    let thinking = thinking?;
+    if !thinking_enabled(
+        thinking.thinking_type.as_deref(),
+        thinking.budget_tokens.is_some(),
+    ) {
+        return None;
+    }
+
+    let effort = match thinking.budget_tokens {
+        Some(budget_tokens) => {
+            let absolute_effort = effort_by_absolute_budget(budget_tokens);
+            let ratio_effort = effort_by_budget_ratio(budget_tokens, max_tokens);
+            higher_effort(absolute_effort, ratio_effort)
+        }
+        None => "medium",
+    };
+
+    Some(effort.to_string())
+}
+
+fn thinking_enabled(mode: Option<&str>, has_budget_tokens: bool) -> bool {
+    match mode.map(|value| value.trim().to_lowercase()) {
+        Some(value) if matches!(value.as_str(), "disabled" | "off" | "none") => false,
+        Some(value) if matches!(value.as_str(), "enabled" | "on" | "auto") => true,
+        Some(_) => true,
+        None => has_budget_tokens,
+    }
+}
+
+fn effort_by_absolute_budget(budget_tokens: u32) -> &'static str {
+    let clamped = budget_tokens.clamp(1, 65_536);
+    if clamped <= 2_048 {
+        "low"
+    } else if clamped <= 8_192 {
+        "medium"
+    } else {
+        "high"
+    }
+}
+
+fn effort_by_budget_ratio(budget_tokens: u32, max_tokens: u32) -> &'static str {
+    if max_tokens == 0 {
+        return "medium";
+    }
+
+    let ratio = budget_tokens as f64 / max_tokens as f64;
+    if ratio < 0.25 {
+        "low"
+    } else if ratio <= 0.6 {
+        "medium"
+    } else {
+        "high"
+    }
+}
+
+fn higher_effort(left: &'static str, right: &'static str) -> &'static str {
+    if effort_rank(left) >= effort_rank(right) {
+        left
+    } else {
+        right
+    }
+}
+
+fn effort_rank(value: &str) -> u8 {
+    match value {
+        "high" => 3,
+        "medium" => 2,
+        "low" => 1,
+        _ => 0,
     }
 }
 
@@ -108,4 +196,56 @@ struct LooseToolChoicePayload {
     #[serde(rename = "type")]
     choice_type: Option<String>,
     name: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::derive_reasoning_effort;
+    use crate::models::ClaudeThinking;
+
+    #[test]
+    fn skips_reasoning_effort_when_thinking_missing() {
+        let effort = derive_reasoning_effort(None, 4_096, "o3-mini");
+        assert!(effort.is_none());
+    }
+
+    #[test]
+    fn skips_reasoning_effort_when_thinking_disabled() {
+        let thinking = ClaudeThinking {
+            thinking_type: Some("disabled".to_string()),
+            budget_tokens: Some(12_000),
+        };
+        let effort = derive_reasoning_effort(Some(&thinking), 4_096, "o3-mini");
+        assert!(effort.is_none());
+    }
+
+    #[test]
+    fn maps_budget_to_high_effort() {
+        let thinking = ClaudeThinking {
+            thinking_type: Some("enabled".to_string()),
+            budget_tokens: Some(10_000),
+        };
+        let effort = derive_reasoning_effort(Some(&thinking), 16_000, "o3-mini");
+        assert_eq!(effort.as_deref(), Some("high"));
+    }
+
+    #[test]
+    fn maps_missing_budget_to_medium_effort() {
+        let thinking = ClaudeThinking {
+            thinking_type: Some("enabled".to_string()),
+            budget_tokens: None,
+        };
+        let effort = derive_reasoning_effort(Some(&thinking), 4_096, "o3-mini");
+        assert_eq!(effort.as_deref(), Some("medium"));
+    }
+
+    #[test]
+    fn skips_reasoning_effort_for_unsupported_models() {
+        let thinking = ClaudeThinking {
+            thinking_type: Some("enabled".to_string()),
+            budget_tokens: Some(8_192),
+        };
+        let effort = derive_reasoning_effort(Some(&thinking), 8_192, "gpt-4o");
+        assert!(effort.is_none());
+    }
 }

@@ -10,6 +10,8 @@ pub struct OpenAiChatRequest {
     pub messages: Vec<OpenAiMessage>,
     pub max_tokens: u32,
     pub temperature: f64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<String>,
     pub stream: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stream_options: Option<OpenAiStreamOptions>,
@@ -47,6 +49,7 @@ pub enum OpenAiMessage {
 }
 
 impl OpenAiMessage {
+    #[cfg(test)]
     pub fn role(&self) -> &str {
         match self {
             Self::System(_) => ROLE_SYSTEM,
@@ -260,4 +263,12 @@ fn is_upstream_native_model(model: &str) -> bool {
         || lowered.starts_with("ep-")
         || lowered.starts_with("doubao-")
         || lowered.starts_with("deepseek-")
+}
+
+pub fn supports_reasoning_effort(model: &str) -> bool {
+    let lowered = model.to_lowercase();
+    lowered.starts_with("o1")
+        || lowered.starts_with("o3")
+        || lowered.starts_with("o4")
+        || lowered.starts_with("gpt-5")
 }

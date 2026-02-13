@@ -4,22 +4,12 @@ use serde::Serialize;
 
 use crate::models::StreamingToolCallState;
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Default, Serialize)]
 pub struct StreamUsage {
     pub input_tokens: u64,
     pub output_tokens: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cache_read_input_tokens: Option<u64>,
-}
-
-impl Default for StreamUsage {
-    fn default() -> Self {
-        Self {
-            input_tokens: 0,
-            output_tokens: 0,
-            cache_read_input_tokens: None,
-        }
-    }
 }
 
 pub struct StreamState {

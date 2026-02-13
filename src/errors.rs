@@ -1,6 +1,6 @@
 use salvo::http::StatusCode;
-use serde::de::{Deserializer, IgnoredAny};
 use serde::Deserialize;
+use serde::de::{Deserializer, IgnoredAny};
 
 #[derive(Debug)]
 pub struct UpstreamError {
@@ -150,6 +150,9 @@ mod tests {
 
     #[test]
     fn returns_original_body_for_non_json() {
-        assert_eq!(extract_error_message_from_body("gateway failed"), "gateway failed");
+        assert_eq!(
+            extract_error_message_from_body("gateway failed"),
+            "gateway failed"
+        );
     }
 }

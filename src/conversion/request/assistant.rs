@@ -1,9 +1,7 @@
 use serde_json::Value;
 use tracing::warn;
 
-use crate::conversion::request::models::{
-    OpenAiAssistantMessage, OpenAiMessage, OpenAiToolCall,
-};
+use crate::conversion::request::models::{OpenAiAssistantMessage, OpenAiMessage, OpenAiToolCall};
 use crate::models::{ClaudeContent, ClaudeContentBlock, ClaudeMessage};
 
 pub fn convert_claude_assistant_message(message: &ClaudeMessage) -> OpenAiMessage {

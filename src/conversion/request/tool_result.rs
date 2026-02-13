@@ -127,10 +127,10 @@ fn extract_item_text(item: &Value) -> Option<String> {
 
 fn normalize_object_tool_content(content: &Value) -> String {
     let parsed = serde_json::from_value::<LooseTextBlock>(content.clone());
-    if let Ok(block) = parsed {
-        if block.block_type.as_deref() == Some(CONTENT_TEXT) {
-            return block.text_as_owned().unwrap_or_default();
-        }
+    if let Ok(block) = parsed
+        && block.block_type.as_deref() == Some(CONTENT_TEXT)
+    {
+        return block.text_as_owned().unwrap_or_default();
     }
 
     content.to_string()

@@ -115,6 +115,8 @@ pub struct ClaudeMessagesRequest {
     pub max_tokens: u32,
     pub messages: Vec<ClaudeMessage>,
     #[serde(default)]
+    pub thinking: Option<ClaudeThinking>,
+    #[serde(default)]
     pub system: Option<ClaudeSystemContent>,
     #[serde(default)]
     pub stop_sequences: Option<Vec<String>>,
@@ -128,6 +130,14 @@ pub struct ClaudeMessagesRequest {
     pub tools: Option<Vec<ClaudeToolDefinition>>,
     #[serde(default)]
     pub tool_choice: Option<ClaudeToolChoice>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ClaudeThinking {
+    #[serde(rename = "type", default)]
+    pub thinking_type: Option<String>,
+    #[serde(default)]
+    pub budget_tokens: Option<u32>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]

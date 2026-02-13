@@ -4,9 +4,9 @@ use tracing::{error, warn};
 use uuid::Uuid;
 
 use crate::conversion::stream::helpers::{
-    StreamChoice, ToolCallDelta, content_delta, first_choice, parse_stream_chunk, snapshot_json_state,
-    tool_arguments_delta, tool_call_deltas, tool_call_index, tool_started, update_finish_reason,
-    update_tool_identity, update_usage,
+    StreamChoice, ToolCallDelta, content_delta, first_choice, parse_stream_chunk,
+    snapshot_json_state, tool_arguments_delta, tool_call_deltas, tool_call_index, tool_started,
+    update_finish_reason, update_tool_identity, update_usage,
 };
 use crate::conversion::stream::sse::{
     send_error_sse, send_start_sequence, send_stop_sequence, send_text_delta,

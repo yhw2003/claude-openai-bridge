@@ -20,7 +20,7 @@ use system::extract_system_text;
 use tool_result::{
     convert_claude_tool_results, has_non_tool_result_content, is_tool_result_user_message,
 };
-use tools::{add_optional_request_fields, add_tool_choice, add_tools};
+use tools::{add_optional_request_fields, add_tool_choice, add_tools, derive_reasoning_effort};
 use user::convert_claude_user_message;
 
 pub fn convert_claude_to_openai(
@@ -28,10 +28,25 @@ pub fn convert_claude_to_openai(
     config: &Config,
 ) -> OpenAiChatRequest {
     let mapped_model = map_claude_model_to_openai(&request.model, config);
+    let thinking_type = request
+        .thinking
+        .as_ref()
+        .and_then(|value| value.thinking_type.as_deref())
+        .unwrap_or("none");
+    let thinking_budget_tokens = request
+        .thinking
+        .as_ref()
+        .and_then(|value| value.budget_tokens);
+    let mapped_reasoning_effort =
+        derive_reasoning_effort(request.thinking.as_ref(), request.max_tokens, &mapped_model);
+
     debug!(
         phase = "model_routing",
         claude_model = %request.model,
         upstream_model = %mapped_model,
+        thinking_type,
+        thinking_budget_tokens = ?thinking_budget_tokens,
+        reasoning_effort = mapped_reasoning_effort.as_deref().unwrap_or("none"),
         "Model routing"
     );
     let mut openai_messages: Vec<OpenAiMessage> = Vec::new();
@@ -76,10 +91,7 @@ pub fn convert_claude_to_openai(
     openai_request
 }
 
-fn push_system_message(
-    request: &ClaudeMessagesRequest,
-    openai_messages: &mut Vec<OpenAiMessage>,
-) {
+fn push_system_message(request: &ClaudeMessagesRequest, openai_messages: &mut Vec<OpenAiMessage>) {
     let Some(system) = &request.system else {
         return;
     };
@@ -176,6 +188,7 @@ fn build_request_base(
         messages: openai_messages,
         max_tokens: request.max_tokens,
         temperature: request.temperature.unwrap_or(1.0),
+        reasoning_effort: None,
         stream: request.stream.unwrap_or(false),
         stream_options: None,
         stop: None,
@@ -217,6 +230,7 @@ mod tests {
             model: "claude-3-5-sonnet-20241022".to_string(),
             max_tokens: 256,
             messages,
+            thinking: None,
             system: None,
             stop_sequences: None,
             stream: Some(false),
@@ -335,11 +349,13 @@ mod tests {
             },
             ClaudeMessage {
                 role: ROLE_USER.to_string(),
-                content: Some(ClaudeContent::Blocks(vec![ClaudeContentBlock::ToolResult {
-                    tool_use_id: Some("call_unknown".to_string()),
-                    content: Some(json!("ok")),
-                    extra: Default::default(),
-                }])),
+                content: Some(ClaudeContent::Blocks(vec![
+                    ClaudeContentBlock::ToolResult {
+                        tool_use_id: Some("call_unknown".to_string()),
+                        content: Some(json!("ok")),
+                        extra: Default::default(),
+                    },
+                ])),
             },
         ]);
 
