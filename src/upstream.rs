@@ -1,6 +1,6 @@
 use reqwest::Client;
 use reqwest::header::{
-    AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderName, HeaderValue, USER_AGENT,
+    ACCEPT_ENCODING, AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderName, HeaderValue, USER_AGENT,
 };
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -11,6 +11,7 @@ use tracing::{error, warn};
 use crate::config::Config;
 use crate::conversion::response::{OpenAiChatResponse, OpenAiResponsesResponse};
 use crate::errors::{UpstreamError, classify_openai_error, extract_error_message_from_body};
+use crate::upstream_parse::parse_responses_body;
 use crate::utils::to_salvo_status;
 
 #[derive(Clone, Debug)]
@@ -75,7 +76,27 @@ impl UpstreamClient {
             )
             .await?;
 
-        parse_success_json_response::<OpenAiResponsesResponse>(response).await
+        let status = response.status();
+        let content_type = response
+            .headers()
+            .get(CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .map(ToOwned::to_owned);
+        let text = response.text().await.map_err(|error| UpstreamError {
+            status: salvo::http::StatusCode::BAD_GATEWAY,
+            message: classify_openai_error(&format!(
+                "failed to read upstream response body: {error}"
+            )),
+        })?;
+
+        parse_responses_body(&text, content_type.as_deref()).map_err(|error| UpstreamError {
+            status: salvo::http::StatusCode::BAD_GATEWAY,
+            message: classify_openai_error(&format!(
+                "failed to parse upstream JSON response (status: {status}, content-type: {}, body-preview: {}): {error}",
+                content_type.unwrap_or_else(|| "<missing>".to_string()),
+                text.chars().take(1200).collect::<String>()
+            )),
+        })
     }
 
     pub async fn responses_stream<T: Serialize + ?Sized>(
@@ -270,6 +291,7 @@ fn log_send_stage_error(error: &reqwest::Error, timeout: Option<Duration>, reque
 fn build_upstream_headers(config: &Config, session_id: &str) -> HeaderMap {
     let mut headers = HeaderMap::new();
     headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+    headers.insert(ACCEPT_ENCODING, HeaderValue::from_static("identity"));
     headers.insert(
         USER_AGENT,
         HeaderValue::from_static("claude-openai-bridge-rust/1.0.0"),
