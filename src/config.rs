@@ -106,10 +106,14 @@ impl Config {
                 .unwrap_or(16 * 1024 * 1024),
         );
 
-        let session_ttl_min_secs =
-            env_u64_with_fallback("SESSION_TTL_MIN_SECS", toml_config.session_ttl_min_secs.unwrap_or(1800));
-        let session_ttl_max_secs =
-            env_u64_with_fallback("SESSION_TTL_MAX_SECS", toml_config.session_ttl_max_secs.unwrap_or(86400));
+        let session_ttl_min_secs = env_u64_with_fallback(
+            "SESSION_TTL_MIN_SECS",
+            toml_config.session_ttl_min_secs.unwrap_or(1800),
+        );
+        let session_ttl_max_secs = env_u64_with_fallback(
+            "SESSION_TTL_MAX_SECS",
+            toml_config.session_ttl_max_secs.unwrap_or(86400),
+        );
         let session_cleanup_interval_secs = env_u64_with_fallback(
             "SESSION_CLEANUP_INTERVAL_SECS",
             toml_config.session_cleanup_interval_secs.unwrap_or(60),

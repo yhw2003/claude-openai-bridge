@@ -3,6 +3,8 @@ use reqwest::header::{
     AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderName, HeaderValue, USER_AGENT,
 };
 use serde::Serialize;
+use serde::de::DeserializeOwned;
+use std::borrow::Cow;
 use std::time::Duration;
 use tracing::{error, warn};
 
@@ -22,10 +24,7 @@ impl UpstreamClient {
         let client = Client::builder()
             .build()
             .map_err(|error| format!("failed to initialize upstream HTTP client: {error}"))?;
-        Ok(Self {
-            client,
-            config,
-        })
+        Ok(Self { client, config })
     }
 
     pub async fn chat_completion<T: Serialize + ?Sized>(
@@ -42,15 +41,7 @@ impl UpstreamClient {
                 "non_stream",
             )
             .await?;
-        response
-            .json::<OpenAiChatResponse>()
-            .await
-            .map_err(|error| UpstreamError {
-                status: salvo::http::StatusCode::BAD_GATEWAY,
-                message: classify_openai_error(&format!(
-                    "failed to parse upstream JSON response: {error}"
-                )),
-            })
+        parse_success_json_response::<OpenAiChatResponse>(response).await
     }
 
     pub async fn chat_completion_stream<T: Serialize + ?Sized>(
@@ -84,15 +75,7 @@ impl UpstreamClient {
             )
             .await?;
 
-        response
-            .json::<OpenAiResponsesResponse>()
-            .await
-            .map_err(|error| UpstreamError {
-                status: salvo::http::StatusCode::BAD_GATEWAY,
-                message: classify_openai_error(&format!(
-                    "failed to parse upstream JSON response: {error}"
-                )),
-            })
+        parse_success_json_response::<OpenAiResponsesResponse>(response).await
     }
 
     pub async fn responses_stream<T: Serialize + ?Sized>(
@@ -143,13 +126,105 @@ impl UpstreamClient {
         }
 
         let status = to_salvo_status(response.status());
-        let text = response.text().await.unwrap_or_default();
+        let content_type = response
+            .headers()
+            .get(CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .map(ToOwned::to_owned)
+            .unwrap_or_else(|| "<missing>".to_string());
+        let text = match response.text().await {
+            Ok(value) => value,
+            Err(error) => {
+                warn!(
+                    phase = "upstream_error_body_read_failed",
+                    status = %status,
+                    content_type = %content_type,
+                    "failed to read upstream error response body: {error}"
+                );
+                String::new()
+            }
+        };
+        let body_preview = preview_text(&text, BODY_PREVIEW_LIMIT);
         let raw_message = extract_error_message_from_body(&text);
+
+        warn!(
+            phase = "upstream_http_error",
+            status = %status,
+            content_type = %content_type,
+            body_preview = %body_preview,
+            "upstream returned non-success status"
+        );
 
         Err(UpstreamError {
             status,
             message: classify_openai_error(&raw_message),
         })
+    }
+}
+
+const BODY_PREVIEW_LIMIT: usize = 1024;
+
+async fn parse_success_json_response<T: DeserializeOwned>(
+    response: reqwest::Response,
+) -> Result<T, UpstreamError> {
+    let status = response.status();
+    let content_type = response
+        .headers()
+        .get(CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| "<missing>".to_string());
+    let body = response.bytes().await.map_err(|error| UpstreamError {
+        status: salvo::http::StatusCode::BAD_GATEWAY,
+        message: classify_openai_error(&format!(
+            "failed to read upstream response body (status: {status}, content-type: {content_type}): {error}"
+        )),
+    })?;
+
+    decode_json_body::<T>(status, &content_type, &body)
+}
+
+fn decode_json_body<T: DeserializeOwned>(
+    status: reqwest::StatusCode,
+    content_type: &str,
+    body: &[u8],
+) -> Result<T, UpstreamError> {
+    serde_json::from_slice::<T>(body).map_err(|error| {
+        let body_preview = preview_bytes(body, BODY_PREVIEW_LIMIT);
+        UpstreamError {
+            status: salvo::http::StatusCode::BAD_GATEWAY,
+            message: classify_openai_error(&format!(
+                "failed to parse upstream JSON response (status: {status}, content-type: {content_type}, body-preview: {body_preview}): {error}"
+            )),
+        }
+    })
+}
+
+fn preview_bytes(body: &[u8], limit: usize) -> String {
+    match std::str::from_utf8(body) {
+        Ok(text) => preview_text(text, limit).into_owned(),
+        Err(_) => {
+            let len = body.len().min(limit);
+            let mut preview = String::with_capacity(len * 2 + 32);
+            for byte in &body[..len] {
+                use std::fmt::Write;
+                let _ = write!(&mut preview, "{byte:02x}");
+            }
+            if body.len() > limit {
+                preview.push_str("...(truncated)");
+            }
+            format!("<non-utf8 hex: {preview}>")
+        }
+    }
+}
+
+fn preview_text(text: &str, limit: usize) -> Cow<'_, str> {
+    let mut iterator = text.chars();
+    let preview: String = iterator.by_ref().take(limit).collect();
+    if iterator.next().is_none() {
+        Cow::Borrowed(text)
+    } else {
+        Cow::Owned(format!("{preview}...(truncated)"))
     }
 }
 
@@ -225,8 +300,10 @@ fn build_upstream_headers(config: &Config, session_id: &str) -> HeaderMap {
 
 #[cfg(test)]
 mod tests {
-    use super::build_upstream_headers;
+    use super::{build_upstream_headers, decode_json_body, preview_bytes, preview_text};
     use crate::config::{Config, WireApi};
+    use reqwest::StatusCode;
+    use serde::Deserialize;
     use std::collections::HashMap;
     use uuid::Uuid;
 
@@ -278,5 +355,53 @@ mod tests {
             .expect("session_id header should exist");
 
         assert!(Uuid::parse_str(value).is_ok());
+    }
+
+    #[derive(Debug, Deserialize)]
+    struct TestPayload {
+        value: String,
+    }
+
+    #[test]
+    fn decodes_valid_json_payload() {
+        let payload = decode_json_body::<TestPayload>(
+            StatusCode::OK,
+            "application/json",
+            br#"{"value":"ok"}"#,
+        )
+        .expect("json should decode");
+
+        assert_eq!(payload.value, "ok");
+    }
+
+    #[test]
+    fn parse_error_includes_status_content_type_and_preview() {
+        let error = decode_json_body::<TestPayload>(
+            StatusCode::OK,
+            "text/html",
+            b"<html><body>upstream gateway failed</body></html>",
+        )
+        .expect_err("json should fail");
+
+        assert_eq!(error.status, salvo::http::StatusCode::BAD_GATEWAY);
+        assert!(error.message.contains("status: 200 OK"));
+        assert!(error.message.contains("content-type: text/html"));
+        assert!(
+            error
+                .message
+                .contains("body-preview: <html><body>upstream gateway failed</body></html>")
+        );
+    }
+
+    #[test]
+    fn preview_text_truncates_long_text() {
+        let preview = preview_text("abcdef", 3);
+        assert_eq!(preview, "abc...(truncated)");
+    }
+
+    #[test]
+    fn preview_bytes_formats_non_utf8_as_hex() {
+        let preview = preview_bytes(&[0xff, 0x00, 0x7f], 8);
+        assert_eq!(preview, "<non-utf8 hex: ff007f>");
     }
 }

@@ -75,24 +75,11 @@ pub async fn create_message(req: &mut Request, res: &mut Response) {
 
     match state.config.wire_api {
         WireApi::Chat => {
-            handle_chat_message(
-                res,
-                request,
-                thinking_requested,
-                &identity_key,
-                &session_id,
-            )
-            .await
+            handle_chat_message(res, request, thinking_requested, &identity_key, &session_id).await
         }
         WireApi::Responses => {
-            handle_responses_message(
-                res,
-                request,
-                thinking_requested,
-                &identity_key,
-                &session_id,
-            )
-            .await
+            handle_responses_message(res, request, thinking_requested, &identity_key, &session_id)
+                .await
         }
     }
 }
@@ -293,7 +280,11 @@ async fn handle_responses_message(
         return;
     }
 
-    let upstream_response = match state.upstream.responses(&responses_request, session_id).await {
+    let upstream_response = match state
+        .upstream
+        .responses(&responses_request, session_id)
+        .await
+    {
         Ok(value) => value,
         Err(error) => {
             upstream_failed(res, error.status, &error.message);
@@ -341,7 +332,9 @@ async fn handle_chat_streaming_request(
     tokio::spawn(async move {
         let usage =
             stream_openai_to_claude_sse(upstream_response, sender, model, thinking_requested).await;
-        sessions.add_usage(&identity_key, usage.total_tokens()).await;
+        sessions
+            .add_usage(&identity_key, usage.total_tokens())
+            .await;
     });
 }
 
@@ -379,7 +372,9 @@ async fn handle_responses_streaming_request(
             thinking_requested,
         )
         .await;
-        sessions.add_usage(&identity_key, usage.total_tokens()).await;
+        sessions
+            .add_usage(&identity_key, usage.total_tokens())
+            .await;
     });
 }
 
@@ -576,11 +571,7 @@ fn parse_bearer_token(authorization: &str) -> Option<&str> {
         return None;
     }
     let token = token.trim();
-    if token.is_empty() {
-        None
-    } else {
-        Some(token)
-    }
+    if token.is_empty() { None } else { Some(token) }
 }
 
 fn parse_client_auth(raw_key: &str) -> Option<ClientAuth> {

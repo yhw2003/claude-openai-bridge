@@ -21,10 +21,7 @@ pub async fn run() {
         config.session_ttl_max_secs,
         config.session_cleanup_interval_secs,
     );
-    spawn_session_cleanup_task(
-        sessions.clone(),
-        config.session_cleanup_interval_secs,
-    );
+    spawn_session_cleanup_task(sessions.clone(), config.session_cleanup_interval_secs);
     set_app_state(AppState {
         config: config.clone(),
         upstream,
