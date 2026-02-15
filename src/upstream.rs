@@ -5,8 +5,8 @@ use reqwest::header::{
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use std::borrow::Cow;
-use std::time::Duration;
-use tracing::{error, warn};
+use std::time::{Duration, Instant};
+use tracing::{debug, error, warn};
 
 use crate::config::Config;
 use crate::conversion::response::{OpenAiChatResponse, OpenAiResponsesResponse};
@@ -42,7 +42,13 @@ impl UpstreamClient {
                 "non_stream",
             )
             .await?;
-        parse_success_json_response::<OpenAiChatResponse>(response).await
+        parse_success_json_response::<OpenAiChatResponse>(
+            response,
+            "non_stream",
+            "/chat/completions",
+            session_id,
+        )
+        .await
     }
 
     pub async fn chat_completion_stream<T: Serialize + ?Sized>(
@@ -75,25 +81,13 @@ impl UpstreamClient {
                 "non_stream",
             )
             .await?;
-
-        let status = response.status();
-        let content_type = response
-            .headers()
-            .get(CONTENT_TYPE)
-            .and_then(|value| value.to_str().ok())
-            .map(ToOwned::to_owned);
-        let text = response.text().await.map_err(|error| UpstreamError {
-            status: salvo::http::StatusCode::BAD_GATEWAY,
-            message: classify_openai_error(&format!(
-                "failed to read upstream response body: {error}"
-            )),
-        })?;
-
-        parse_responses_body(&text, content_type.as_deref()).map_err(|error| UpstreamError {
+        let (status, content_type, text) =
+            parse_success_text_response(response, "non_stream", "/responses", session_id).await?;
+        parse_responses_body(&text, Some(&content_type)).map_err(|error| UpstreamError {
             status: salvo::http::StatusCode::BAD_GATEWAY,
             message: classify_openai_error(&format!(
                 "failed to parse upstream JSON response (status: {status}, content-type: {}, body-preview: {}): {error}",
-                content_type.unwrap_or_else(|| "<missing>".to_string()),
+                content_type,
                 text.chars().take(1200).collect::<String>()
             )),
         })
@@ -125,7 +119,7 @@ impl UpstreamClient {
 
         let mut request_builder = self
             .client
-            .post(url)
+            .post(&url)
             .headers(build_upstream_headers(&self.config, session_id))
             .json(body);
 
@@ -137,72 +131,354 @@ impl UpstreamClient {
             request_builder = request_builder.timeout(duration);
         }
 
-        let response = request_builder
-            .send()
-            .await
-            .map_err(|error| build_send_error(error, timeout, request_kind))?;
+        let timeout_secs = timeout.map(|value| value.as_secs());
+        debug!(
+            phase = "upstream_request_start",
+            request_kind,
+            path,
+            session_id,
+            url = %url,
+            timeout_secs = ?timeout_secs,
+            "Sending upstream request"
+        );
+        let request_started = Instant::now();
+        let response = request_builder.send().await.map_err(|error| {
+            build_send_error(
+                error,
+                timeout,
+                request_kind,
+                path,
+                session_id,
+                request_started.elapsed(),
+            )
+        })?;
+
+        log_response_headers(
+            &response,
+            request_kind,
+            path,
+            session_id,
+            timeout_secs,
+            request_started.elapsed(),
+        );
 
         if response.status().is_success() {
             return Ok(response);
         }
 
-        let status = to_salvo_status(response.status());
-        let content_type = response
-            .headers()
-            .get(CONTENT_TYPE)
-            .and_then(|value| value.to_str().ok())
-            .map(ToOwned::to_owned)
-            .unwrap_or_else(|| "<missing>".to_string());
-        let text = match response.text().await {
-            Ok(value) => value,
-            Err(error) => {
-                warn!(
-                    phase = "upstream_error_body_read_failed",
-                    status = %status,
-                    content_type = %content_type,
-                    "failed to read upstream error response body: {error}"
-                );
-                String::new()
-            }
-        };
-        let body_preview = preview_text(&text, BODY_PREVIEW_LIMIT);
-        let raw_message = extract_error_message_from_body(&text);
-
-        warn!(
-            phase = "upstream_http_error",
-            status = %status,
-            content_type = %content_type,
-            body_preview = %body_preview,
-            "upstream returned non-success status"
-        );
-
-        Err(UpstreamError {
-            status,
-            message: classify_openai_error(&raw_message),
-        })
+        handle_http_error_response(response, request_kind, path, session_id).await
     }
 }
 
 const BODY_PREVIEW_LIMIT: usize = 1024;
 
-async fn parse_success_json_response<T: DeserializeOwned>(
+async fn handle_http_error_response(
     response: reqwest::Response,
-) -> Result<T, UpstreamError> {
-    let status = response.status();
-    let content_type = response
+    request_kind: &str,
+    path: &str,
+    session_id: &str,
+) -> Result<reqwest::Response, UpstreamError> {
+    let upstream_status = response.status();
+    let status = to_salvo_status(upstream_status);
+    let content_type = response_content_type(&response);
+    let content_length = response.content_length();
+    debug!(
+        phase = "upstream_http_error_body_read_start",
+        request_kind,
+        path,
+        session_id,
+        upstream_status = %upstream_status,
+        content_type = %content_type,
+        content_length = ?content_length,
+        "Reading upstream error response body"
+    );
+
+    let body_read_started = Instant::now();
+    let read_context = BodyReadContext::new(
+        request_kind,
+        path,
+        session_id,
+        upstream_status,
+        &content_type,
+        content_length,
+    );
+    let text = match response.text().await {
+        Ok(value) => {
+            debug!(
+                phase = "upstream_http_error_body_read_done",
+                request_kind,
+                path,
+                session_id,
+                upstream_status = %upstream_status,
+                body_bytes = value.len(),
+                elapsed_ms = body_read_started.elapsed().as_millis() as u64,
+                "Read upstream error response body"
+            );
+            value
+        }
+        Err(error) => {
+            log_error_body_read_failure(&error, &read_context, body_read_started.elapsed());
+            String::new()
+        }
+    };
+
+    let body_preview = preview_text(&text, BODY_PREVIEW_LIMIT);
+    let raw_message = extract_error_message_from_body(&text);
+
+    warn!(
+        phase = "upstream_http_error",
+        request_kind,
+        path,
+        session_id,
+        status = %status,
+        upstream_status = %upstream_status,
+        content_type = %content_type,
+        content_length = ?content_length,
+        body_bytes = text.len(),
+        body_preview = %body_preview,
+        "Upstream returned non-success status"
+    );
+
+    Err(UpstreamError {
+        status,
+        message: classify_openai_error(&raw_message),
+    })
+}
+
+fn log_error_body_read_failure(
+    error: &reqwest::Error,
+    context: &BodyReadContext<'_>,
+    elapsed: Duration,
+) {
+    if error.is_timeout() {
+        warn!(
+            phase = "upstream_http_error_body_timeout",
+            request_kind = context.request_kind,
+            path = context.path,
+            session_id = context.session_id,
+            status = %context.status,
+            content_type = %context.content_type,
+            content_length = ?context.content_length,
+            elapsed_ms = elapsed.as_millis() as u64,
+            "Timed out while reading upstream error response body: {error}"
+        );
+        return;
+    }
+
+    warn!(
+        phase = "upstream_error_body_read_failed",
+        request_kind = context.request_kind,
+        path = context.path,
+        session_id = context.session_id,
+        status = %context.status,
+        content_type = %context.content_type,
+        content_length = ?context.content_length,
+        elapsed_ms = elapsed.as_millis() as u64,
+        "Failed to read upstream error response body: {error}"
+    );
+}
+
+fn log_response_headers(
+    response: &reqwest::Response,
+    request_kind: &str,
+    path: &str,
+    session_id: &str,
+    timeout_secs: Option<u64>,
+    elapsed: Duration,
+) {
+    debug!(
+        phase = "upstream_response_headers",
+        request_kind,
+        path,
+        session_id,
+        timeout_secs = ?timeout_secs,
+        status = %response.status(),
+        content_type = %response_content_type(response),
+        content_length = ?response.content_length(),
+        transfer_encoding = %response_header_value(response, "transfer-encoding"),
+        elapsed_ms = elapsed.as_millis() as u64,
+        "Received upstream response headers"
+    );
+}
+
+fn response_content_type(response: &reqwest::Response) -> String {
+    response
         .headers()
         .get(CONTENT_TYPE)
         .and_then(|value| value.to_str().ok())
         .map(ToOwned::to_owned)
-        .unwrap_or_else(|| "<missing>".to_string());
-    let body = response.bytes().await.map_err(|error| UpstreamError {
-        status: salvo::http::StatusCode::BAD_GATEWAY,
-        message: classify_openai_error(&format!(
-            "failed to read upstream response body (status: {status}, content-type: {content_type}): {error}"
-        )),
+        .unwrap_or_else(|| "<missing>".to_string())
+}
+
+fn response_header_value(response: &reqwest::Response, header_name: &str) -> String {
+    response
+        .headers()
+        .get(header_name)
+        .and_then(|value| value.to_str().ok())
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| "<missing>".to_string())
+}
+
+async fn parse_success_text_response(
+    response: reqwest::Response,
+    request_kind: &str,
+    path: &str,
+    session_id: &str,
+) -> Result<(reqwest::StatusCode, String, String), UpstreamError> {
+    let status = response.status();
+    let content_type = response_content_type(&response);
+    let content_length = response.content_length();
+    debug!(
+        phase = "upstream_success_body_read_start",
+        request_kind,
+        path,
+        session_id,
+        status = %status,
+        content_type = %content_type,
+        content_length = ?content_length,
+        "Reading upstream success response body"
+    );
+
+    let body_read_started = Instant::now();
+    let read_context = BodyReadContext::new(
+        request_kind,
+        path,
+        session_id,
+        status,
+        &content_type,
+        content_length,
+    );
+    let text = response.text().await.map_err(|error| {
+        build_body_read_error(error, &read_context, body_read_started.elapsed())
     })?;
 
+    debug!(
+        phase = "upstream_success_body_read_done",
+        request_kind,
+        path,
+        session_id,
+        status = %status,
+        body_bytes = text.len(),
+        elapsed_ms = body_read_started.elapsed().as_millis() as u64,
+        "Read upstream success response body"
+    );
+
+    Ok((status, content_type, text))
+}
+
+async fn parse_success_json_response<T: DeserializeOwned>(
+    response: reqwest::Response,
+    request_kind: &str,
+    path: &str,
+    session_id: &str,
+) -> Result<T, UpstreamError> {
+    let status = response.status();
+    let content_type = response_content_type(&response);
+    let content_length = response.content_length();
+    debug!(
+        phase = "upstream_success_body_read_start",
+        request_kind,
+        path,
+        session_id,
+        status = %status,
+        content_type = %content_type,
+        content_length = ?content_length,
+        "Reading upstream success response body"
+    );
+
+    let body_read_started = Instant::now();
+    let read_context = BodyReadContext::new(
+        request_kind,
+        path,
+        session_id,
+        status,
+        &content_type,
+        content_length,
+    );
+    let body = response.bytes().await.map_err(|error| {
+        build_body_read_error(error, &read_context, body_read_started.elapsed())
+    })?;
+    debug!(
+        phase = "upstream_success_body_read_done",
+        request_kind,
+        path,
+        session_id,
+        status = %status,
+        body_bytes = body.len(),
+        elapsed_ms = body_read_started.elapsed().as_millis() as u64,
+        "Read upstream success response body"
+    );
+
     decode_json_body::<T>(status, &content_type, &body)
+}
+
+fn build_body_read_error(
+    error: reqwest::Error,
+    context: &BodyReadContext<'_>,
+    elapsed: Duration,
+) -> UpstreamError {
+    if error.is_timeout() {
+        error!(
+            phase = "upstream_body_read_timeout",
+            request_kind = context.request_kind,
+            path = context.path,
+            session_id = context.session_id,
+            status = %context.status,
+            content_type = %context.content_type,
+            content_length = ?context.content_length,
+            elapsed_ms = elapsed.as_millis() as u64,
+            "Timed out while reading upstream response body: {error}"
+        );
+    } else {
+        error!(
+            phase = "upstream_body_read_failed",
+            request_kind = context.request_kind,
+            path = context.path,
+            session_id = context.session_id,
+            status = %context.status,
+            content_type = %context.content_type,
+            content_length = ?context.content_length,
+            elapsed_ms = elapsed.as_millis() as u64,
+            "Failed to read upstream response body: {error}"
+        );
+    }
+
+    UpstreamError {
+        status: salvo::http::StatusCode::BAD_GATEWAY,
+        message: classify_openai_error(&format!(
+            "failed to read upstream response body (status: {}, content-type: {}): {error}",
+            context.status, context.content_type
+        )),
+    }
+}
+
+struct BodyReadContext<'a> {
+    request_kind: &'a str,
+    path: &'a str,
+    session_id: &'a str,
+    status: reqwest::StatusCode,
+    content_type: &'a str,
+    content_length: Option<u64>,
+}
+
+impl<'a> BodyReadContext<'a> {
+    fn new(
+        request_kind: &'a str,
+        path: &'a str,
+        session_id: &'a str,
+        status: reqwest::StatusCode,
+        content_type: &'a str,
+        content_length: Option<u64>,
+    ) -> Self {
+        Self {
+            request_kind,
+            path,
+            session_id,
+            status,
+            content_type,
+            content_length,
+        }
+    }
 }
 
 fn decode_json_body<T: DeserializeOwned>(
@@ -253,22 +529,35 @@ fn build_send_error(
     error: reqwest::Error,
     timeout: Option<Duration>,
     request_kind: &'static str,
+    path: &str,
+    session_id: &str,
+    elapsed: Duration,
 ) -> UpstreamError {
-    log_send_stage_error(&error, timeout, request_kind);
+    log_send_stage_error(&error, timeout, request_kind, path, session_id, elapsed);
     UpstreamError {
         status: salvo::http::StatusCode::BAD_GATEWAY,
         message: classify_openai_error(&format!("upstream request failed: {error}")),
     }
 }
 
-fn log_send_stage_error(error: &reqwest::Error, timeout: Option<Duration>, request_kind: &str) {
+fn log_send_stage_error(
+    error: &reqwest::Error,
+    timeout: Option<Duration>,
+    request_kind: &str,
+    path: &str,
+    session_id: &str,
+    elapsed: Duration,
+) {
     let timeout_secs = timeout.map(|value| value.as_secs());
 
     if error.is_timeout() {
         error!(
             phase = "upstream_connect_timeout",
             request_kind,
+            path,
+            session_id,
             timeout_secs = ?timeout_secs,
+            elapsed_ms = elapsed.as_millis() as u64,
             "Upstream timeout before response headers"
         );
         return;
@@ -277,14 +566,24 @@ fn log_send_stage_error(error: &reqwest::Error, timeout: Option<Duration>, reque
     if error.is_connect() {
         error!(
             phase = "upstream_connect_error",
-            request_kind, "Upstream connection failed before response headers: {error}"
+            request_kind,
+            path,
+            session_id,
+            timeout_secs = ?timeout_secs,
+            elapsed_ms = elapsed.as_millis() as u64,
+            "Upstream connection failed before response headers: {error}"
         );
         return;
     }
 
     error!(
         phase = "upstream_request_error",
-        request_kind, "Upstream request failed before response headers: {error}"
+        request_kind,
+        path,
+        session_id,
+        timeout_secs = ?timeout_secs,
+        elapsed_ms = elapsed.as_millis() as u64,
+        "Upstream request failed before response headers: {error}"
     );
 }
 
