@@ -35,19 +35,22 @@ pub fn derive_reasoning_effort(
         return None;
     }
 
-    let thinking = thinking?;
-    if !is_thinking_requested(Some(thinking)) {
-        return None;
-    }
+    let effort = thinking
+        .and_then(|thinking| {
+            if !is_thinking_requested(Some(thinking)) {
+                return None;
+            }
 
-    let effort = match thinking.budget_tokens {
-        Some(budget_tokens) => {
-            let absolute_effort = effort_by_absolute_budget(budget_tokens);
-            let ratio_effort = effort_by_budget_ratio(budget_tokens, max_tokens);
-            higher_effort(absolute_effort, ratio_effort)
-        }
-        None => "medium",
-    };
+            Some(match thinking.budget_tokens {
+                Some(budget_tokens) => {
+                    let absolute_effort = effort_by_absolute_budget(budget_tokens);
+                    let ratio_effort = effort_by_budget_ratio(budget_tokens, max_tokens);
+                    higher_effort(absolute_effort, ratio_effort)
+                }
+                None => "medium",
+            })
+        })
+        .unwrap_or("low");
 
     Some(effort.to_string())
 }
@@ -212,19 +215,19 @@ mod tests {
     use crate::models::ClaudeThinking;
 
     #[test]
-    fn skips_reasoning_effort_when_thinking_missing() {
+    fn defaults_to_low_when_thinking_missing() {
         let effort = derive_reasoning_effort(None, 4_096, "o3-mini");
-        assert!(effort.is_none());
+        assert_eq!(effort.as_deref(), Some("low"));
     }
 
     #[test]
-    fn skips_reasoning_effort_when_thinking_disabled() {
+    fn defaults_to_low_when_thinking_disabled() {
         let thinking = ClaudeThinking {
             thinking_type: Some("disabled".to_string()),
             budget_tokens: Some(12_000),
         };
         let effort = derive_reasoning_effort(Some(&thinking), 4_096, "o3-mini");
-        assert!(effort.is_none());
+        assert_eq!(effort.as_deref(), Some("low"));
     }
 
     #[test]
