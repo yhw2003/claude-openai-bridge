@@ -11,6 +11,7 @@ use crate::models::{ClaudeMessagesRequest, ClaudeThinking, ClaudeToolChoice};
 pub fn add_optional_request_fields(
     request: &ClaudeMessagesRequest,
     openai_request: &mut OpenAiChatRequest,
+    min_thinking_level: Option<&str>,
 ) {
     if let Some(stop_sequences) = &request.stop_sequences {
         openai_request.stop = Some(stop_sequences.clone());
@@ -23,6 +24,7 @@ pub fn add_optional_request_fields(
         request.thinking.as_ref(),
         request.max_tokens,
         &openai_request.model,
+        min_thinking_level,
     );
 }
 
@@ -30,12 +32,13 @@ pub fn derive_reasoning_effort(
     thinking: Option<&ClaudeThinking>,
     max_tokens: u32,
     upstream_model: &str,
+    min_thinking_level: Option<&str>,
 ) -> Option<String> {
     if !supports_reasoning_effort(upstream_model) {
         return None;
     }
 
-    let effort = thinking
+    let base_effort = thinking
         .and_then(|thinking| {
             if !is_thinking_requested(Some(thinking)) {
                 return None;
@@ -51,6 +54,11 @@ pub fn derive_reasoning_effort(
             })
         })
         .unwrap_or("low");
+
+    let effort = match min_thinking_level {
+        Some(minimum) if effort_rank(minimum) > effort_rank(base_effort) => minimum,
+        _ => base_effort,
+    };
 
     Some(effort.to_string())
 }
@@ -216,7 +224,7 @@ mod tests {
 
     #[test]
     fn defaults_to_low_when_thinking_missing() {
-        let effort = derive_reasoning_effort(None, 4_096, "o3-mini");
+        let effort = derive_reasoning_effort(None, 4_096, "o3-mini", None);
         assert_eq!(effort.as_deref(), Some("low"));
     }
 
@@ -226,7 +234,7 @@ mod tests {
             thinking_type: Some("disabled".to_string()),
             budget_tokens: Some(12_000),
         };
-        let effort = derive_reasoning_effort(Some(&thinking), 4_096, "o3-mini");
+        let effort = derive_reasoning_effort(Some(&thinking), 4_096, "o3-mini", None);
         assert_eq!(effort.as_deref(), Some("low"));
     }
 
@@ -236,7 +244,7 @@ mod tests {
             thinking_type: Some("enabled".to_string()),
             budget_tokens: Some(10_000),
         };
-        let effort = derive_reasoning_effort(Some(&thinking), 16_000, "o3-mini");
+        let effort = derive_reasoning_effort(Some(&thinking), 16_000, "o3-mini", None);
         assert_eq!(effort.as_deref(), Some("high"));
     }
 
@@ -246,17 +254,43 @@ mod tests {
             thinking_type: Some("enabled".to_string()),
             budget_tokens: None,
         };
-        let effort = derive_reasoning_effort(Some(&thinking), 4_096, "o3-mini");
+        let effort = derive_reasoning_effort(Some(&thinking), 4_096, "o3-mini", None);
         assert_eq!(effort.as_deref(), Some("medium"));
     }
 
     #[test]
-    fn skips_reasoning_effort_for_unsupported_models() {
+    fn applies_minimum_floor_from_low_to_medium() {
+        let effort = derive_reasoning_effort(None, 4_096, "o3-mini", Some("medium"));
+        assert_eq!(effort.as_deref(), Some("medium"));
+    }
+
+    #[test]
+    fn applies_minimum_floor_from_medium_to_high() {
+        let thinking = ClaudeThinking {
+            thinking_type: Some("enabled".to_string()),
+            budget_tokens: None,
+        };
+        let effort = derive_reasoning_effort(Some(&thinking), 4_096, "o3-mini", Some("high"));
+        assert_eq!(effort.as_deref(), Some("high"));
+    }
+
+    #[test]
+    fn does_not_downgrade_when_base_already_higher_than_minimum() {
+        let thinking = ClaudeThinking {
+            thinking_type: Some("enabled".to_string()),
+            budget_tokens: Some(10_000),
+        };
+        let effort = derive_reasoning_effort(Some(&thinking), 16_000, "o3-mini", Some("medium"));
+        assert_eq!(effort.as_deref(), Some("high"));
+    }
+
+    #[test]
+    fn unsupported_models_still_skip_reasoning_effort_with_floor_configured() {
         let thinking = ClaudeThinking {
             thinking_type: Some("enabled".to_string()),
             budget_tokens: Some(8_192),
         };
-        let effort = derive_reasoning_effort(Some(&thinking), 8_192, "gpt-4o");
+        let effort = derive_reasoning_effort(Some(&thinking), 8_192, "gpt-4o", Some("high"));
         assert!(effort.is_none());
     }
 }

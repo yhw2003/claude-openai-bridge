@@ -31,6 +31,7 @@ pub struct Config {
     pub big_model: String,
     pub middle_model: String,
     pub small_model: String,
+    pub min_thinking_level: Option<String>,
     pub custom_headers: HashMap<String, String>,
 }
 
@@ -54,6 +55,7 @@ struct TomlConfigRaw {
     big_model: Option<String>,
     middle_model: Option<String>,
     small_model: Option<String>,
+    min_thinking_level: Option<String>,
     custom_headers: Option<HashMap<String, String>>,
 }
 
@@ -148,6 +150,11 @@ impl Config {
             .or(toml_config.small_model)
             .unwrap_or_else(|| "gpt-4o-mini".to_string());
 
+        let min_thinking_level_raw = env::var("MIN_THINKING_LEVEL")
+            .ok()
+            .or(toml_config.min_thinking_level);
+        let min_thinking_level = parse_min_thinking_level(min_thinking_level_raw.as_deref())?;
+
         let mut custom_headers = toml_config.custom_headers.unwrap_or_default();
         custom_headers.extend(collect_custom_headers());
 
@@ -170,6 +177,7 @@ impl Config {
             big_model,
             middle_model,
             small_model,
+            min_thinking_level,
             custom_headers,
         })
     }
@@ -244,6 +252,20 @@ fn parse_wire_api(value: Option<&str>) -> Result<WireApi, String> {
     }
 }
 
+fn parse_min_thinking_level(value: Option<&str>) -> Result<Option<String>, String> {
+    let Some(raw_value) = value.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(None);
+    };
+
+    let normalized = raw_value.to_ascii_lowercase();
+    match normalized.as_str() {
+        "low" | "medium" | "high" => Ok(Some(normalized)),
+        _ => Err(format!(
+            "Invalid MIN_THINKING_LEVEL value '{raw_value}'. Supported values: low, medium, high."
+        )),
+    }
+}
+
 fn env_u16_with_fallback(key: &str, fallback: u16) -> u16 {
     env::var(key)
         .ok()
@@ -282,4 +304,40 @@ fn env_usize_with_fallback(key: &str, fallback: usize) -> usize {
         .ok()
         .and_then(|value| value.parse::<usize>().ok())
         .unwrap_or(fallback)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_min_thinking_level;
+
+    #[test]
+    fn parse_min_thinking_level_accepts_valid_values_case_insensitive() {
+        assert_eq!(
+            parse_min_thinking_level(Some("  LOW ")).expect("should parse"),
+            Some("low".to_string())
+        );
+        assert_eq!(
+            parse_min_thinking_level(Some("Medium")).expect("should parse"),
+            Some("medium".to_string())
+        );
+        assert_eq!(
+            parse_min_thinking_level(Some("HIGH")).expect("should parse"),
+            Some("high".to_string())
+        );
+    }
+
+    #[test]
+    fn parse_min_thinking_level_treats_empty_as_none() {
+        assert_eq!(parse_min_thinking_level(None).expect("should parse"), None);
+        assert_eq!(
+            parse_min_thinking_level(Some("   ")).expect("should parse"),
+            None
+        );
+    }
+
+    #[test]
+    fn parse_min_thinking_level_rejects_invalid_values() {
+        let error = parse_min_thinking_level(Some("max")).expect_err("should fail");
+        assert!(error.contains("Invalid MIN_THINKING_LEVEL value 'max'"));
+    }
 }

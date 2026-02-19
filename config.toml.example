@@ -10,6 +10,7 @@ openai_api_key = "sk-your-openai-api-key"
 openai_base_url = "https://api.openai.com/v1"
 # azure_api_version = "2024-10-21"
 # wire_api = "chat" # 默认 chat，可选：chat | responses
+# min_thinking_level = "medium" # 可选：low | medium | high；仅对支持 reasoning_effort 的模型生效
 
 host = "0.0.0.0"
 port = 8082

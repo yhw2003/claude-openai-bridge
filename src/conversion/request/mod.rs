@@ -42,8 +42,12 @@ pub fn convert_claude_to_openai(
         .thinking
         .as_ref()
         .and_then(|value| value.budget_tokens);
-    let mapped_reasoning_effort =
-        derive_reasoning_effort(request.thinking.as_ref(), request.max_tokens, &mapped_model);
+    let mapped_reasoning_effort = derive_reasoning_effort(
+        request.thinking.as_ref(),
+        request.max_tokens,
+        &mapped_model,
+        config.min_thinking_level.as_deref(),
+    );
 
     debug!(
         phase = "model_routing",
@@ -64,7 +68,11 @@ pub fn convert_claude_to_openai(
     );
 
     let mut openai_request = build_request_base(request, mapped_model, openai_messages);
-    add_optional_request_fields(request, &mut openai_request);
+    add_optional_request_fields(
+        request,
+        &mut openai_request,
+        config.min_thinking_level.as_deref(),
+    );
     add_tools(request, &mut openai_request);
     add_tool_choice(request, &mut openai_request);
 
@@ -230,6 +238,7 @@ mod tests {
             big_model: "gpt-4o".to_string(),
             middle_model: "gpt-4o".to_string(),
             small_model: "gpt-4o-mini".to_string(),
+            min_thinking_level: None,
             custom_headers: Default::default(),
         }
     }

@@ -211,6 +211,7 @@ mod tests {
             big_model: "gpt-4o".to_string(),
             middle_model: "gpt-4o".to_string(),
             small_model: "gpt-4o-mini".to_string(),
+            min_thinking_level: None,
             custom_headers: Default::default(),
         }
     }
