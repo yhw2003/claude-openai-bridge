@@ -104,6 +104,14 @@ pub(crate) fn map_tool_use_block(
     arguments: Option<&str>,
 ) -> Option<ClaudeContentBlock> {
     if kind != Some(TOOL_FUNCTION) {
+        warn!(
+            phase = "drop_tool_use",
+            reason = "unsupported_tool_call_type",
+            tool_call_type = kind.unwrap_or("<missing>"),
+            tool_call_id = id.unwrap_or("<missing>"),
+            tool_name = name.unwrap_or("<missing>"),
+            "Dropping upstream tool_call with unsupported type"
+        );
         return None;
     }
 

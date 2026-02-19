@@ -219,6 +219,42 @@ mod tests {
     }
 
     #[test]
+    fn skips_non_function_tool_call_type() {
+        let openai_response = json!({
+            "id": "chatcmpl_test",
+            "choices": [{
+                "finish_reason": "tool_calls",
+                "message": {
+                    "content": null,
+                    "tool_calls": [{
+                        "id": "call_abc123",
+                        "type": "custom",
+                        "function": {
+                            "name": "Bash",
+                            "arguments": "{}"
+                        }
+                    }]
+                }
+            }],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1}
+        });
+
+        let parsed: OpenAiChatResponse =
+            serde_json::from_value(openai_response).expect("response should deserialize");
+        let converted = convert_openai_to_claude_response(&parsed, &empty_request())
+            .expect("conversion should succeed");
+
+        let payload = serde_json::to_value(converted).expect("serialize");
+        let content = payload
+            .get("content")
+            .and_then(Value::as_array)
+            .expect("content array");
+        assert!(content
+            .iter()
+            .all(|block| block.get("type").and_then(Value::as_str) != Some("tool_use")));
+    }
+
+    #[test]
     fn keeps_tool_call_with_valid_id() {
         let openai_response = json!({
             "id": "chatcmpl_test",
