@@ -547,7 +547,7 @@ fn extract_client_auth(req: &Request) -> Option<ClientAuth> {
     parse_client_auth(raw_key)
 }
 
-fn extract_raw_client_key<'a>(req: &'a Request) -> Option<&'a str> {
+fn extract_raw_client_key(req: &Request) -> Option<&str> {
     let x_api_key = req
         .headers()
         .get("x-api-key")

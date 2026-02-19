@@ -7,6 +7,7 @@ mod handlers;
 mod models;
 mod state;
 mod upstream;
+mod upstream_parse;
 mod utils;
 
 #[tokio::main]
