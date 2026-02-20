@@ -51,7 +51,7 @@ jobs:
           short_sha="$(git rev-parse --short "${tag_commit}")"
           release_date="$(date -u -d "${release_updated_at}" +'%Y%m%d' 2>/dev/null || date -u +'%Y%m%d')"
 
-          release_title="${short_sha}-${release_date}"
+          release_title="${release_date}-${short_sha}"
           image_ref="${image_name}:${docker_tag}"
           asset_name="${image_name}-${docker_tag}-${short_sha}.tar.gz"
 
