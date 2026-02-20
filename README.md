@@ -78,6 +78,7 @@ ANTHROPIC_BASE_URL=http://localhost:8082 ANTHROPIC_API_KEY="any-value" claude
 | `OPENAI_BASE_URL` | `openai_base_url` | `https://api.openai.com/v1` |
 | `AZURE_API_VERSION` | `azure_api_version` | 可选；附加为 query 参数 `api-version` |
 | `WIRE_API` | `wire_api` | `chat`（可选：`chat` / `responses`） |
+| `MIN_THINKING_LEVEL` | `min_thinking_level` | 可选：`low` / `medium` / `high`；作为 `reasoning_effort` 下限，仅对支持该字段的模型生效 |
 | `BIG_MODEL` | `big_model` | `gpt-4o` |
 | `MIDDLE_MODEL` | `middle_model` | 默认继承 `big_model` |
 | `SMALL_MODEL` | `small_model` | `gpt-4o-mini` |
@@ -110,6 +111,7 @@ ANTHROPIC_BASE_URL=http://localhost:8082 ANTHROPIC_API_KEY="any-value" claude
 - `stream_request_timeout`（可选；>0 时生效，流式请求总超时）
 - `request_body_max_size`（默认：`16777216`，16MB）
 - `debug_tool_id_matching`（默认：`false`；为 `true` 时输出更详细的 tool_call_id 匹配诊断日志）
+- `min_thinking_level`（可选：`low` / `medium` / `high`；作为上游 `reasoning_effort` 的最小等级，仅对支持 `reasoning_effort` 的模型生效）
 - `wire_api`（默认：`chat`；可选 `chat` / `responses`，详见下文“`WIRE_API` 选择”）
 - `session_ttl_min_secs`（默认：`1800`）
 - `session_ttl_max_secs`（默认：`86400`）
@@ -128,6 +130,25 @@ ANTHROPIC_BASE_URL=http://localhost:8082 ANTHROPIC_API_KEY="any-value" claude
   - `session_cleanup_interval_secs`（默认 60）
 
 说明：该机制仅影响上游请求路由与缓存亲和性，不改变 Claude 协议语义。
+
+### `min_thinking_level` 说明
+
+`min_thinking_level` 用于给上游请求的 `reasoning_effort` 设置一个全局下限。
+
+- 可选值：`low` / `medium` / `high`（大小写不敏感，内部会归一化）
+- 未配置时：不设置全局下限，按请求自身的 thinking 推导
+- 配置后：最终 `reasoning_effort = max(请求推导结果, min_thinking_level)`
+- 仅对支持 `reasoning_effort` 的模型生效；不支持的模型会忽略该字段
+
+示例：
+
+```bash
+MIN_THINKING_LEVEL=medium
+```
+
+```toml
+min_thinking_level = "medium"
+```
 
 ### `[custom_headers]` 说明
 
@@ -150,7 +171,7 @@ CUSTOM_HEADER_ACCEPT=application/json
 
 ### 环境变量覆盖（可选）
 
-如需在部署时临时覆盖配置，可使用同名环境变量（例如 `OPENAI_API_KEY`、`WIRE_API`、`SESSION_TTL_MIN_SECS`、`CUSTOM_HEADER_X_API_KEY`）。
+如需在部署时临时覆盖配置，可使用同名环境变量（例如 `OPENAI_API_KEY`、`WIRE_API`、`MIN_THINKING_LEVEL`、`SESSION_TTL_MIN_SECS`、`CUSTOM_HEADER_X_API_KEY`）。
 
 ## 转换行为说明
 
