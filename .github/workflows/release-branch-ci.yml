@@ -85,7 +85,6 @@ jobs:
   binary-build:
     needs:
       - rust-ci
-      - docker-build
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -97,6 +96,9 @@ jobs:
           - os: windows-latest
             target: x86_64-pc-windows-msvc
             archive_ext: zip
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            archive_ext: tar.gz
     permissions:
       contents: read
 
